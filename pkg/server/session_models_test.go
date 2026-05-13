@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,6 +30,21 @@ type modelSwitchingRuntime struct {
 	availableModels []runtime.ModelChoice
 	overrides       map[string]string
 	setErr          error
+
+	// availableModelsCalled fires every time AvailableModels is invoked.
+	// Tests can use it to coordinate with a deliberately-slow runtime
+	// call (see availableModelsDelay).
+	availableModelsCalled chan struct{}
+	// availableModelsDelay, when set, makes AvailableModels block on
+	// this channel before returning. Used by lock-contention tests to
+	// hold a runtime call open while another goroutine probes the
+	// SessionManager.
+	availableModelsDelay <-chan struct{}
+	// setAgentModelCalled fires every time SetAgentModel is invoked.
+	setAgentModelCalled chan struct{}
+	// setAgentModelDelay, when set, makes SetAgentModel block on this
+	// channel before returning.
+	setAgentModelDelay <-chan struct{}
 }
 
 func newModelSwitchingRuntime(models []runtime.ModelChoice) *modelSwitchingRuntime {
@@ -45,17 +61,45 @@ func (m *modelSwitchingRuntime) SupportsModelSwitching() bool { return true }
 
 func (m *modelSwitchingRuntime) AvailableModels(_ context.Context) []runtime.ModelChoice {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	delay := m.availableModelsDelay
+	called := m.availableModelsCalled
 	out := make([]runtime.ModelChoice, len(m.availableModels))
 	copy(out, m.availableModels)
+	m.mu.Unlock()
+
+	if called != nil {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+	}
+	if delay != nil {
+		<-delay
+	}
 	return out
 }
 
 func (m *modelSwitchingRuntime) SetAgentModel(_ context.Context, agentName, modelRef string) error {
 	m.mu.Lock()
+	setErr := m.setErr
+	delay := m.setAgentModelDelay
+	called := m.setAgentModelCalled
+	m.mu.Unlock()
+
+	if called != nil {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+	}
+	if delay != nil {
+		<-delay
+	}
+
+	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.setErr != nil {
-		return m.setErr
+	if setErr != nil {
+		return setErr
 	}
 	if modelRef == "" {
 		delete(m.overrides, agentName)
@@ -398,6 +442,37 @@ func TestSessionManager_SetSessionAgentModel_RuntimeFailureLeavesStateUntouched(
 	assert.Equal(t, []string{"openai/gpt-4o"}, sess.CustomModelsUsed)
 }
 
+// Server-side errors (store-write failures, runtime errors that aren't
+// the well-known sentinels) must be reported as 500, not 400. 400 is
+// reserved for client-side mistakes like an invalid request body.
+func TestAttachedServer_SetSessionModel_StoreFailureReturns500(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := &failingStore{Store: session.NewInMemorySessionStore()}
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	fake := newModelSwitchingRuntime(nil)
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(sess.ID, fake, sess)
+
+	store.mu.Lock()
+	store.failUpdate = true
+	store.mu.Unlock()
+
+	addr := startAttachedServer(t, ctx, sm)
+	body := bytes.NewReader([]byte(`{"model":"openai/gpt-4o"}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, addr+"/api/sessions/"+sess.ID+"/model", body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
 // runtime.DecorateModelChoices is exercised end-to-end through the GET
 // handler tests above; unit-level corner cases live in pkg/runtime
 // (see model_switcher_test.go).
@@ -437,6 +512,121 @@ func TestAttachedServer_ModelEndpoints_404WhenNotRunning(t *testing.T) {
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
+}
+
+// AvailableSessionModels must NOT hold sm.mux while the runtime's
+// AvailableModels call is in progress. If it did, an unrelated session
+// operation that takes sm.mux (e.g. SetSessionStarred on a different
+// session) would block for the duration of the runtime call. We verify
+// this by holding the runtime call open and then making sure another
+// sm.mux-acquiring method completes before we release the runtime call.
+func TestSessionManager_AvailableSessionModels_DoesNotHoldMuxDuringRuntimeIO(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	slowSess := session.New()
+	unrelatedSess := session.New()
+	require.NoError(t, store.AddSession(ctx, slowSess))
+	require.NoError(t, store.AddSession(ctx, unrelatedSess))
+
+	called := make(chan struct{}, 1)
+	release := make(chan struct{})
+	slow := newModelSwitchingRuntime(nil)
+	slow.availableModelsCalled = called
+	slow.availableModelsDelay = release
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(slowSess.ID, slow, slowSess)
+	sm.AttachRuntime(unrelatedSess.ID, &fakeRuntime{}, unrelatedSess)
+
+	// Start a slow AvailableSessionModels call on the first session.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _, _ = sm.AvailableSessionModels(ctx, slowSess.ID)
+	}()
+
+	// Wait until the runtime is actually inside AvailableModels (and so
+	// stuck on `release`).
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime AvailableModels was never called")
+	}
+
+	// While the runtime call is parked, an unrelated method that
+	// acquires sm.mux must complete promptly. If sm.mux were held for
+	// the duration of the runtime call this would deadlock.
+	unrelatedDone := make(chan error, 1)
+	go func() {
+		unrelatedDone <- sm.SetSessionStarred(ctx, unrelatedSess.ID, true)
+	}()
+
+	select {
+	case err := <-unrelatedDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-done
+		t.Fatal("sm.mux is held across runtime I/O: unrelated session op blocked")
+	}
+
+	// Let the slow call finish so the test cleanup can proceed.
+	close(release)
+	<-done
+}
+
+// SetSessionAgentModel must also avoid holding sm.mux while the runtime's
+// SetAgentModel call is in progress.
+func TestSessionManager_SetSessionAgentModel_DoesNotHoldMuxDuringRuntimeIO(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	slowSess := session.New()
+	unrelatedSess := session.New()
+	require.NoError(t, store.AddSession(ctx, slowSess))
+	require.NoError(t, store.AddSession(ctx, unrelatedSess))
+
+	called := make(chan struct{}, 1)
+	release := make(chan struct{})
+	slow := newModelSwitchingRuntime(nil)
+	slow.setAgentModelCalled = called
+	slow.setAgentModelDelay = release
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(slowSess.ID, slow, slowSess)
+	sm.AttachRuntime(unrelatedSess.ID, &fakeRuntime{}, unrelatedSess)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = sm.SetSessionAgentModel(ctx, slowSess.ID, "openai/gpt-4o")
+	}()
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime SetAgentModel was never called")
+	}
+
+	unrelatedDone := make(chan error, 1)
+	go func() {
+		unrelatedDone <- sm.SetSessionStarred(ctx, unrelatedSess.ID, true)
+	}()
+
+	select {
+	case err := <-unrelatedDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-done
+		t.Fatal("sm.mux is held across runtime I/O: unrelated session op blocked")
+	}
+
+	close(release)
+	<-done
 }
 
 // applyStoredOverrides is the helper called by runtimeForSession to

@@ -610,7 +610,12 @@ func (s *Server) setSessionModel(c echo.Context) error {
 		case errors.Is(err, ErrSessionNotRunning):
 			return echo.NewHTTPError(http.StatusNotFound, err.Error())
 		default:
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			// Unknown errors come from the runtime (e.g. an inline model
+			// ref that fails provider creation) or from the session store
+			// (e.g. a write failure). Both are server-side concerns, not
+			// client mistakes, so map to 500. Validation of the request
+			// body itself is handled above by Bind which returns 400.
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 		}
 	}
 
