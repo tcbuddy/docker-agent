@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -98,7 +99,8 @@ func TestSessionManager_CreateSession_KeepsModelOverrides(t *testing.T) {
 
 	assert.Equal(t, "openai/gpt-4o", created.AgentModelOverrides["root"])
 	assert.Equal(t, "anthropic/claude-sonnet-4-0", created.AgentModelOverrides["researcher"])
-	assert.Equal(t, []string{"openai/gpt-4o"}, created.CustomModelsUsed)
+	assert.Equal(t, []string{"openai/gpt-4o"}, created.CustomModelsUsed,
+		"CreateSession is a passthrough: only refs explicitly listed in CustomModelsUsed should be tracked")
 
 	// Mutating the template after creation must not affect the stored session.
 	template.AgentModelOverrides["root"] = "mutated"
@@ -399,3 +401,91 @@ func TestSessionManager_SetSessionAgentModel_RuntimeFailureLeavesStateUntouched(
 // runtime.DecorateModelChoices is exercised end-to-end through the GET
 // handler tests above; unit-level corner cases live in pkg/runtime
 // (see model_switcher_test.go).
+
+// When no runtime is attached for the session, the endpoints must
+// return 404 (not 400 or 500) so callers can tell apart a stale id
+// from an actual server-side problem.
+func TestAttachedServer_ModelEndpoints_404WhenNotRunning(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	// Note: no AttachRuntime call.
+
+	addr := startAttachedServer(t, ctx, sm)
+
+	t.Run("GET", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", http.NoBody)
+		require.NoError(t, err)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	})
+
+	t.Run("PATCH", func(t *testing.T) {
+		body := bytes.NewReader([]byte(`{"model":"openai/gpt-4o"}`))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, addr+"/api/sessions/"+sess.ID+"/model", body)
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	})
+}
+
+// applyStoredOverrides is the helper called by runtimeForSession to
+// re-apply persisted overrides on a freshly-built runtime. We can't
+// drive runtimeForSession with a fake runtime (it constructs a real
+// LocalRuntime), so we cover the helper's contract directly here.
+func TestApplyStoredOverrides(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no-op when no overrides", func(t *testing.T) {
+		t.Parallel()
+		fake := newModelSwitchingRuntime(nil)
+		applyStoredOverrides(t.Context(), "sess", fake, nil)
+
+		fake.mu.Lock()
+		assert.Empty(t, fake.overrides)
+		fake.mu.Unlock()
+	})
+
+	t.Run("no-op when runtime does not support switching", func(t *testing.T) {
+		t.Parallel()
+		// fakeRuntime has SupportsModelSwitching == false; SetAgentModel
+		// must NOT be called on it (it would panic since fakeRuntime
+		// does not implement the method either).
+		applyStoredOverrides(t.Context(), "sess", &fakeRuntime{}, map[string]string{"root": "openai/gpt-4o"})
+		// Reaching this point without panic is the assertion.
+	})
+
+	t.Run("applies each override on the runtime", func(t *testing.T) {
+		t.Parallel()
+		fake := newModelSwitchingRuntime(nil)
+		applyStoredOverrides(t.Context(), "sess", fake, map[string]string{
+			"root":       "openai/gpt-4o",
+			"researcher": "anthropic/claude-sonnet-4-0",
+		})
+
+		fake.mu.Lock()
+		assert.Equal(t, "openai/gpt-4o", fake.overrides["root"])
+		assert.Equal(t, "anthropic/claude-sonnet-4-0", fake.overrides["researcher"])
+		fake.mu.Unlock()
+	})
+
+	t.Run("runtime errors are swallowed (logged) so the session still loads", func(t *testing.T) {
+		t.Parallel()
+		fake := newModelSwitchingRuntime(nil)
+		fake.setErr = errors.New("model not in config anymore")
+
+		require.NotPanics(t, func() {
+			applyStoredOverrides(t.Context(), "sess", fake, map[string]string{"root": "gone/model"})
+		})
+	})
+}

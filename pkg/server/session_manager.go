@@ -229,7 +229,8 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 	// Copy model-related fields from the template so callers can pin a
 	// specific model when creating a session over the API. The runtime
 	// will pick these up the first time it is built for the session
-	// (see runtimeForSession).
+	// (see runtimeForSession). Callers that want a model to also appear
+	// in the picker history should include it in CustomModelsUsed.
 	if len(sessionTemplate.AgentModelOverrides) > 0 {
 		sess.AgentModelOverrides = maps.Clone(sessionTemplate.AgentModelOverrides)
 	}
@@ -463,7 +464,7 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, messages []api.Message) error {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
 	if !exists {
-		return errors.New("session not found or not running")
+		return ErrSessionNotRunning
 	}
 
 	for _, msg := range messages {
@@ -488,7 +489,7 @@ func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, mess
 func (sm *SessionManager) FollowUpSession(_ context.Context, sessionID string, messages []api.Message) (streaming bool, err error) {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
 	if !exists {
-		return false, errors.New("session not found or not running")
+		return false, ErrSessionNotRunning
 	}
 
 	for _, msg := range messages {
@@ -656,13 +657,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 	// Apply any stored per-agent model overrides so that a session
 	// resumed (or freshly created with overrides via CreateSession) uses
 	// the requested models instead of the agent's defaults.
-	if len(sess.AgentModelOverrides) > 0 && run.SupportsModelSwitching() {
-		for agentName, modelRef := range sess.AgentModelOverrides {
-			if err := run.SetAgentModel(ctx, agentName, modelRef); err != nil {
-				slog.WarnContext(ctx, "Failed to apply stored model override", "session_id", sess.ID, "agent", agentName, "model", modelRef, "error", err)
-			}
-		}
-	}
+	applyStoredOverrides(ctx, sess.ID, run, sess.AgentModelOverrides)
 
 	titleGen := sessiontitle.New(agt.Model(ctx), agt.FallbackModels()...)
 
@@ -689,6 +684,22 @@ func (sm *SessionManager) loadTeamWithConfig(ctx context.Context, agentFilename 
 	}
 
 	return teamloader.LoadWithConfig(ctx, agentSource, runConfig)
+}
+
+// applyStoredOverrides applies the persisted per-agent model overrides on
+// the freshly created runtime. Failures are logged at WARN and otherwise
+// ignored: a stored override that no longer resolves (e.g. because the
+// model was removed from the agent's config) must not prevent the
+// session from being resumed with the agent's default model.
+func applyStoredOverrides(ctx context.Context, sessionID string, run runtime.Runtime, overrides map[string]string) {
+	if len(overrides) == 0 || !run.SupportsModelSwitching() {
+		return
+	}
+	for agentName, modelRef := range overrides {
+		if err := run.SetAgentModel(ctx, agentName, modelRef); err != nil {
+			slog.WarnContext(ctx, "Failed to apply stored model override", "session_id", sessionID, "agent", agentName, "model", modelRef, "error", err)
+		}
+	}
 }
 
 // GetAgentToolCount loads the agent's team and returns the number of
@@ -780,6 +791,12 @@ func (sm *SessionManager) SetSessionStarred(ctx context.Context, sessionID strin
 // was created without a ModelSwitcherConfig).
 var ErrModelSwitchingNotSupported = errors.New("model switching not supported by this runtime")
 
+// ErrSessionNotRunning is returned by methods that require an active
+// runtime for the session (i.e. RunSession must have been called or
+// AttachRuntime invoked) when none is found. HTTP handlers map this to
+// 404 to distinguish from other runtime errors.
+var ErrSessionNotRunning = errors.New("session not found or not running")
+
 // AvailableSessionModels returns the list of models available for the
 // session's current agent. The agent's name and the active model override
 // (if any) are returned alongside the choices so callers don't have to
@@ -799,7 +816,7 @@ func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID 
 
 	rs, ok := sm.runtimeSessions.Load(sessionID)
 	if !ok {
-		return "", "", nil, errors.New("session not found or not running")
+		return "", "", nil, ErrSessionNotRunning
 	}
 
 	if !rs.runtime.SupportsModelSwitching() {
@@ -831,7 +848,7 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 
 	rs, ok := sm.runtimeSessions.Load(sessionID)
 	if !ok {
-		return "", "", errors.New("session not found or not running")
+		return "", "", ErrSessionNotRunning
 	}
 
 	if !rs.runtime.SupportsModelSwitching() {

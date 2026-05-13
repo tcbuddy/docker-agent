@@ -574,10 +574,14 @@ func (s *Server) getSessionModels(c echo.Context) error {
 
 	agentName, current, choices, err := s.sm.AvailableSessionModels(c.Request().Context(), sessionID)
 	if err != nil {
-		if errors.Is(err, ErrModelSwitchingNotSupported) {
+		switch {
+		case errors.Is(err, ErrModelSwitchingNotSupported):
 			return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, ErrSessionNotRunning):
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		default:
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 		}
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 
 	return c.JSON(http.StatusOK, runtime.SessionModelsResponse{
@@ -600,10 +604,14 @@ func (s *Server) setSessionModel(c echo.Context) error {
 
 	agentName, modelRef, err := s.sm.SetSessionAgentModel(c.Request().Context(), sessionID, req.Model)
 	if err != nil {
-		if errors.Is(err, ErrModelSwitchingNotSupported) {
+		switch {
+		case errors.Is(err, ErrModelSwitchingNotSupported):
 			return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, ErrSessionNotRunning):
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		default:
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
 	return c.JSON(http.StatusOK, api.SetSessionModelResponse{
