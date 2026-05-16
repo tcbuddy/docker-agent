@@ -15,9 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/gateway"
 	"github.com/docker/docker-agent/pkg/js"
-	"github.com/docker/docker-agent/pkg/memory/database/sqlite"
 	"github.com/docker/docker-agent/pkg/path"
-	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/rag"
 	"github.com/docker/docker-agent/pkg/toolinstall"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -53,7 +51,7 @@ func NewDefaultToolsetRegistry() ToolsetRegistry {
 		creators: map[string]ToolsetCreator{
 			"todo":              todo.CreateToolSet,
 			"tasks":             tasks.CreateToolSet,
-			"memory":            createMemoryTool,
+			"memory":            memory.CreateToolSet,
 			"think":             think.CreateToolSet,
 			"shell":             createShellTool,
 			"script":            createScriptTool,
@@ -151,52 +149,6 @@ func resolveToolsetWorkingDir(toolsetWorkingDir, agentWorkingDir string) string 
 	// agentWorkingDir is empty and path is relative: return as-is.
 	// The child process will inherit the OS working directory.
 	return toolsetWorkingDir
-}
-
-// resolveToolsetPath expands shell patterns (~, env vars) in the given path,
-// then validates it relative to the working directory or parent directory.
-func resolveToolsetPath(toolsetPath, parentDir string, runConfig *config.RuntimeConfig) (string, error) {
-	toolsetPath = path.ExpandPath(toolsetPath)
-
-	var basePath string
-	if filepath.IsAbs(toolsetPath) {
-		basePath = ""
-	} else if wd := runConfig.WorkingDir; wd != "" {
-		basePath = wd
-	} else {
-		basePath = parentDir
-	}
-
-	return path.ValidatePathInDirectory(toolsetPath, basePath)
-}
-
-func createMemoryTool(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
-	var validatedMemoryPath string
-
-	if toolset.Path != "" {
-		var err error
-		validatedMemoryPath, err = resolveToolsetPath(toolset.Path, parentDir, runConfig)
-		if err != nil {
-			return nil, fmt.Errorf("invalid memory database path: %w", err)
-		}
-	} else {
-		// Default: ~/.cagent/memory/<configName>/memory.db
-		if configName == "" {
-			configName = "default"
-		}
-		validatedMemoryPath = filepath.Join(paths.GetDataDir(), "memory", configName, "memory.db")
-	}
-
-	if err := os.MkdirAll(filepath.Dir(validatedMemoryPath), 0o700); err != nil {
-		return nil, fmt.Errorf("failed to create memory database directory: %w", err)
-	}
-
-	db, err := sqlite.NewMemoryDatabase(validatedMemoryPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create memory database: %w", err)
-	}
-
-	return memory.NewMemoryToolWithPath(db, validatedMemoryPath), nil
 }
 
 func createShellTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {

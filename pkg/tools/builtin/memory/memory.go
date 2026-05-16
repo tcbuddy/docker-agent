@@ -4,10 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/memory/database"
+	"github.com/docker/docker-agent/pkg/memory/database/sqlite"
+	"github.com/docker/docker-agent/pkg/path"
+	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -38,6 +45,50 @@ var (
 	_ tools.Describer    = (*Tool)(nil)
 	_ tools.Instructable = (*Tool)(nil)
 )
+
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
+	var validatedMemoryPath string
+
+	if toolset.Path != "" {
+		var err error
+		validatedMemoryPath, err = resolveToolsetPath(toolset.Path, parentDir, runConfig)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory database path: %w", err)
+		}
+	} else {
+		if configName == "" {
+			configName = "default"
+		}
+		validatedMemoryPath = filepath.Join(paths.GetDataDir(), "memory", configName, "memory.db")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(validatedMemoryPath), 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create memory database directory: %w", err)
+	}
+
+	db, err := sqlite.NewMemoryDatabase(validatedMemoryPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create memory database: %w", err)
+	}
+
+	return NewMemoryToolWithPath(db, validatedMemoryPath), nil
+}
+
+func resolveToolsetPath(toolsetPath, parentDir string, runConfig *config.RuntimeConfig) (string, error) {
+	toolsetPath = path.ExpandPath(toolsetPath)
+
+	var basePath string
+	if filepath.IsAbs(toolsetPath) {
+		basePath = ""
+	} else if wd := runConfig.WorkingDir; wd != "" {
+		basePath = wd
+	} else {
+		basePath = parentDir
+	}
+
+	return path.ValidatePathInDirectory(toolsetPath, basePath)
+}
 
 func NewMemoryTool(manager DB) *Tool {
 	return &Tool{
