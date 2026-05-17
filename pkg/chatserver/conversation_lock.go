@@ -1,6 +1,6 @@
 package chatserver
 
-import "sync"
+import "github.com/docker/docker-agent/pkg/concurrent"
 
 // conversationLockSet ensures only one in-flight request at a time per
 // conversation id. Concurrent requests sharing an id would otherwise share
@@ -12,12 +12,11 @@ import "sync"
 // for two reasons: it surfaces the misuse to the client immediately, and it
 // keeps the handler's resource cost bounded (no queue, no waiting goroutines).
 type conversationLockSet struct {
-	mu     sync.Mutex
-	active map[string]struct{}
+	active concurrent.Map[string, struct{}]
 }
 
 func newConversationLockSet() *conversationLockSet {
-	return &conversationLockSet{active: make(map[string]struct{})}
+	return &conversationLockSet{}
 }
 
 // tryAcquire returns true when id was not already in flight. The caller
@@ -27,13 +26,8 @@ func (l *conversationLockSet) tryAcquire(id string) bool {
 	if l == nil || id == "" {
 		return true
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if _, ok := l.active[id]; ok {
-		return false
-	}
-	l.active[id] = struct{}{}
-	return true
+	_, loaded := l.active.LoadOrStore(id, struct{}{})
+	return !loaded
 }
 
 // release marks id as no longer in flight. Safe to call when id is the
@@ -42,7 +36,5 @@ func (l *conversationLockSet) release(id string) {
 	if l == nil || id == "" {
 		return
 	}
-	l.mu.Lock()
-	delete(l.active, id)
-	l.mu.Unlock()
+	l.active.Delete(id)
 }
