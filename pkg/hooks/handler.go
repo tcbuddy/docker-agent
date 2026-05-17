@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 
+	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/shellpath"
 )
 
@@ -60,18 +60,14 @@ type BuiltinFunc func(ctx context.Context, in *Input, args []string) (*Output, e
 // Registry maps [HookType] to [HandlerFactory], plus a name → [BuiltinFunc]
 // table for [HookTypeBuiltin]. Safe for concurrent use.
 type Registry struct {
-	mu        sync.RWMutex
-	factories map[HookType]HandlerFactory
-	builtins  map[string]BuiltinFunc
+	factories concurrent.Map[HookType, HandlerFactory]
+	builtins  concurrent.Map[string, BuiltinFunc]
 }
 
 // NewRegistry returns a registry pre-populated with [HookTypeCommand]
 // (shell command hooks) and [HookTypeBuiltin] (in-process functions).
 func NewRegistry() *Registry {
-	r := &Registry{
-		factories: map[HookType]HandlerFactory{},
-		builtins:  map[string]BuiltinFunc{},
-	}
+	r := &Registry{}
 	r.Register(HookTypeCommand, newCommandFactory())
 	r.Register(HookTypeBuiltin, r.builtinFactory)
 	return r
@@ -79,17 +75,12 @@ func NewRegistry() *Registry {
 
 // Register associates a factory with a hook type, replacing any prior one.
 func (r *Registry) Register(t HookType, f HandlerFactory) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.factories[t] = f
+	r.factories.Store(t, f)
 }
 
 // Lookup returns the factory registered for t, or (nil, false).
 func (r *Registry) Lookup(t HookType) (HandlerFactory, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	f, ok := r.factories[t]
-	return f, ok
+	return r.factories.Load(t)
 }
 
 // RegisterBuiltin makes fn callable as `{type: builtin, command: name}`.
@@ -101,18 +92,13 @@ func (r *Registry) RegisterBuiltin(name string, fn BuiltinFunc) error {
 	if fn == nil {
 		return errors.New("builtin hook function must not be nil")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.builtins[name] = fn
+	r.builtins.Store(name, fn)
 	return nil
 }
 
 // LookupBuiltin returns the function registered as name, or (nil, false).
 func (r *Registry) LookupBuiltin(name string) (BuiltinFunc, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	fn, ok := r.builtins[name]
-	return fn, ok
+	return r.builtins.Load(name)
 }
 
 // DefaultRegistry is the process-wide registry used by [NewExecutor].
