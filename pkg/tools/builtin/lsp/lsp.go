@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/toolinstall"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
+	"github.com/docker/docker-agent/pkg/tools/workingdir"
 )
 
 const (
@@ -357,9 +358,9 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	env = append(env, os.Environ()...)
 	env = toolinstall.PrependBinDirToEnv(env)
 
-	cwd := resolveToolsetWorkingDir(toolset.WorkingDir, runConfig.WorkingDir)
+	cwd := workingdir.Resolve(toolset.WorkingDir, runConfig.WorkingDir)
 	if toolset.WorkingDir != "" {
-		if err := checkDirExists(cwd, "lsp"); err != nil {
+		if err := workingdir.CheckDirExists(cwd, "lsp"); err != nil {
 			return nil, err
 		}
 	}
@@ -369,31 +370,6 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		tool.SetFileTypes(toolset.FileTypes)
 	}
 	return tool, nil
-}
-
-func resolveToolsetWorkingDir(toolsetWorkingDir, defaultWorkingDir string) string {
-	if toolsetWorkingDir != "" {
-		return toolsetWorkingDir
-	}
-	if defaultWorkingDir != "" {
-		return defaultWorkingDir
-	}
-	wd, err := os.Getwd()
-	if err != nil {
-		return "."
-	}
-	return wd
-}
-
-func checkDirExists(dir, kind string) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("%s working_dir %q does not exist or is not accessible: %w", kind, dir, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s working_dir %q is not a directory", kind, dir)
-	}
-	return nil
 }
 
 // New creates a new LSP toolset that connects to an LSP server.
