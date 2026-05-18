@@ -335,6 +335,17 @@ func (t *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 			return nil, err
 		}
 
+		// Skip servers that were disabled after we snapshotted. Without
+		// this check, a concurrent handleDisable could remove the server
+		// from t.enabled and call Stop(), but we'd still hold a reference
+		// and potentially restart it on the next line.
+		t.mu.RLock()
+		_, stillEnabled := t.enabled[e.id]
+		t.mu.RUnlock()
+		if !stillEnabled {
+			continue
+		}
+
 		if !e.ts.IsStarted() {
 			if err := e.ts.Start(ctx); err != nil {
 				// Auth-required is an *expected* deferral when probing
