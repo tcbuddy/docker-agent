@@ -9,14 +9,50 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// ConvertParametersToSchema converts parameters to OpenAI Schema format
-func ConvertParametersToSchema(params any) (shared.FunctionParameters, error) {
+// ConvertParametersToSchema converts parameters to OpenAI Schema format.
+// It also returns whether the schema is compatible with strict mode.
+// Schemas that declare schema-form additionalProperties (e.g. Notion MCP)
+// are not strict-compatible: rewriting them to additionalProperties: false
+// would lose the dictionary value shape the model needs. The caller should
+// set Strict=false on the tool definition in that case.
+func ConvertParametersToSchema(params any) (shared.FunctionParameters, bool, error) {
 	p, err := tools.SchemaToMap(params)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	return fixSchemaArrayItems(removeFormatFields(ensureTypeFields(makeAllRequired(p)))), nil
+	strict := isStrictCompatible(p)
+
+	if strict {
+		return fixSchemaArrayItems(removeFormatFields(ensureTypeFields(makeAllRequired(p)))), true, nil
+	}
+	return fixSchemaArrayItems(removeFormatFields(ensureTypeFields(p))), false, nil
+}
+
+// isStrictCompatible reports whether the schema can use OpenAI strict mode.
+// Strict mode requires every object node to have additionalProperties: false.
+// Schema-form additionalProperties (a map) and additionalProperties: true are
+// both incompatible.
+func isStrictCompatible(schema map[string]any) bool {
+	compatible := true
+	walkSchema(schema, func(node map[string]any) {
+		if !compatible {
+			return
+		}
+		v, ok := node["additionalProperties"]
+		if !ok {
+			return
+		}
+		switch t := v.(type) {
+		case map[string]any:
+			compatible = false
+		case bool:
+			if t {
+				compatible = false
+			}
+		}
+	})
+	return compatible
 }
 
 // walkSchema calls fn on the given schema node, then recursively walks into
@@ -52,17 +88,15 @@ func walkSchema(schema map[string]any, fn func(map[string]any)) {
 	}
 }
 
-// makeAllRequired makes all object properties "required" throughout the schema,
-// because that's what the OpenAI Response API demands.
-// Properties that were not originally required are made nullable.
-// Also ensures all object-type schemas have additionalProperties: false.
+// makeAllRequired enforces OpenAI strict mode: every object property is
+// listed in `required` (newly-required ones are made nullable) and every
+// object node has `additionalProperties: false`.
 func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters {
 	if schema == nil {
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
 
 	walkSchema(schema, func(node map[string]any) {
-		// Check if this node is an object type (either "object" or ["object", ...])
 		isObject := false
 		if typeVal, ok := node["type"]; ok {
 			switch t := typeVal.(type) {
@@ -80,17 +114,10 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 			}
 		}
 
-		// All object types must have additionalProperties: false for OpenAI Responses API strict mode
-		// But only set it if additionalProperties is not already defined as an object schema
 		if isObject {
-			if addProps, exists := node["additionalProperties"]; !exists || addProps == nil || addProps == true {
-				node["additionalProperties"] = false
-			}
-			// If additionalProperties is already set to false or is an object schema (map[string]any),
-			// leave it as is - the object schema case will be walked separately
+			node["additionalProperties"] = false
 		}
 
-		// If the node has explicit properties, make them all required
 		properties, ok := node["properties"].(map[string]any)
 		if !ok {
 			return
@@ -106,8 +133,6 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 		newRequired := []any{}
 		for _, propName := range slices.Sorted(maps.Keys(properties)) {
 			newRequired = append(newRequired, propName)
-
-			// Make newly-required properties nullable
 			if !originallyRequired[propName] {
 				if propMap, ok := properties[propName].(map[string]any); ok {
 					if t, ok := propMap["type"].(string); ok {

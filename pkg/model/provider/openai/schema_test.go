@@ -168,10 +168,7 @@ func TestMakeAllRequired_ArrayItems(t *testing.T) {
 }
 
 func TestMakeAllRequired_AdditionalProperties(t *testing.T) {
-	// Reproduces the Notion MCP tool schema where additionalProperties
-	// contains an object schema with its own properties (like bulleted_list_item).
-	// OpenAI requires all properties in additionalProperties schemas to also
-	// be listed in the required array.
+	// Schema-form additionalProperties must be replaced with false.
 	schema := shared.FunctionParameters{
 		"type": "object",
 		"properties": map[string]any{
@@ -192,21 +189,35 @@ func TestMakeAllRequired_AdditionalProperties(t *testing.T) {
 
 	updated := makeAllRequired(schema)
 
-	// additionalProperties object: all properties must be required
+	assert.Equal(t, false, updated["additionalProperties"])
 	children := updated["properties"].(map[string]any)["children"].(map[string]any)
-	additionalProps := children["additionalProperties"].(map[string]any)
-	additionalRequired := additionalProps["required"].([]any)
-	assert.Len(t, additionalRequired, 2)
-	assert.Contains(t, additionalRequired, "bulleted_list_item")
-	assert.Contains(t, additionalRequired, "numbered_list_item")
+	assert.Equal(t, false, children["additionalProperties"])
+}
 
-	// numbered_list_item was not originally required, so its type should be nullable
-	numberedListItem := additionalProps["properties"].(map[string]any)["numbered_list_item"].(map[string]any)
-	assert.Equal(t, []string{"string", "null"}, numberedListItem["type"])
+func TestMakeAllRequired_JiraEditIssueFields(t *testing.T) {
+	// Regression for the Atlassian remote MCP `editJiraIssue` tool, whose
+	// `fields` property declared additionalProperties as an object schema.
+	schema := shared.FunctionParameters{
+		"type": "object",
+		"properties": map[string]any{
+			"issueIdOrKey": map[string]any{"type": "string"},
+			"fields": map[string]any{
+				"type":                 "object",
+				"description":          "Jira issue fields to update",
+				"additionalProperties": map[string]any{},
+			},
+		},
+		"required": []any{"issueIdOrKey", "fields"},
+	}
 
-	// bulleted_list_item was originally required, so its type should be unchanged
-	bulletedListItem := additionalProps["properties"].(map[string]any)["bulleted_list_item"].(map[string]any)
-	assert.Equal(t, "string", bulletedListItem["type"])
+	result, strict, err := ConvertParametersToSchema(schema)
+	require.NoError(t, err)
+
+	// Schema-form additionalProperties => non-strict, schema preserved as-is.
+	assert.False(t, strict)
+	fields := result["properties"].(map[string]any)["fields"].(map[string]any)
+	_, isMap := fields["additionalProperties"].(map[string]any)
+	assert.True(t, isMap, "non-strict path must preserve schema-form additionalProperties")
 }
 
 func TestRemoveFormatFields(t *testing.T) {
@@ -399,8 +410,92 @@ func TestEnsureTypeFields_AdditionalPropertiesMissingType(t *testing.T) {
 	assert.Equal(t, "object", additionalProps["type"], "additionalProperties should have type added")
 }
 
+func TestIsStrictCompatible(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		schema map[string]any
+		want   bool
+	}{
+		{
+			name:   "empty schema",
+			schema: map[string]any{"type": "object"},
+			want:   true,
+		},
+		{
+			name: "explicit additionalProperties: false",
+			schema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+			},
+			want: true,
+		},
+		{
+			name: "additionalProperties: true is incompatible",
+			schema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": true,
+			},
+			want: false,
+		},
+		{
+			name: "schema-form additionalProperties is incompatible",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"children": map[string]any{
+						"type":                 "object",
+						"additionalProperties": map[string]any{"type": "string"},
+					},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isStrictCompatible(tc.schema))
+		})
+	}
+}
+
+func TestConvertParametersToSchema_NotionStylePreservesShape(t *testing.T) {
+	// Notion MCP tools declare schema-form additionalProperties so the model
+	// knows what dictionary values look like. We must not strip that, even
+	// though it forces non-strict mode.
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"children": map[string]any{
+				"type": "object",
+				"additionalProperties": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"bulleted_list_item": map[string]any{"type": "string"},
+						"numbered_list_item": map[string]any{"type": "string"},
+					},
+					"required": []any{"bulleted_list_item"},
+				},
+			},
+		},
+		"required": []any{"children"},
+	}
+
+	result, strict, err := ConvertParametersToSchema(schema)
+	require.NoError(t, err)
+	require.False(t, strict)
+
+	children := result["properties"].(map[string]any)["children"].(map[string]any)
+	inner, ok := children["additionalProperties"].(map[string]any)
+	require.True(t, ok, "non-strict path must preserve schema-form additionalProperties")
+	props := inner["properties"].(map[string]any)
+	assert.Contains(t, props, "bulleted_list_item")
+	assert.Contains(t, props, "numbered_list_item")
+}
+
 func TestConvertParametersToSchema_AdditionalPropertiesMissingType(t *testing.T) {
-	// End-to-end test: the full pipeline should produce a valid schema
 	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -416,11 +511,15 @@ func TestConvertParametersToSchema_AdditionalPropertiesMissingType(t *testing.T)
 		"required": []any{"filters"},
 	}
 
-	result, err := ConvertParametersToSchema(schema)
+	result, strict, err := ConvertParametersToSchema(schema)
 	require.NoError(t, err)
 
+	// Schema-form additionalProperties => non-strict; the inner schema is
+	// preserved (and ensureTypeFields adds the missing "type").
+	assert.False(t, strict)
 	filters := result["properties"].(map[string]any)["filters"].(map[string]any)
-	additionalProps := filters["additionalProperties"].(map[string]any)
+	additionalProps, ok := filters["additionalProperties"].(map[string]any)
+	require.True(t, ok)
 	assert.Equal(t, "object", additionalProps["type"])
 }
 
