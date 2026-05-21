@@ -2,6 +2,7 @@ package root
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -78,4 +79,143 @@ func TestDockerAgentArgs_PreservesUserYolo(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, yoloCount, "--yolo should not be duplicated, got: %v", got)
+}
+
+func TestGatewayHostPort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty", "", ""},
+		{"bare host", "example.com", "example.com"},
+		{"bare authority", "example.com:443", "example.com:443"},
+		{"https URL", "https://example.com/proxy", "example.com"},
+		{"https URL with port", "https://example.com:8443/proxy", "example.com:8443"},
+		{"production gateway", "https://ai-backend-service.docker.com/proxy", "ai-backend-service.docker.com"},
+		{"staging gateway with path", "https://ai-backend-service-stage.docker.com/proxy", "ai-backend-service-stage.docker.com"},
+		{"bare authority with path", "example.com:443/proxy", "example.com:443"},
+		{"bare authority with query", "example.com:443?foo=bar", "example.com:443"},
+		{"protocol-relative authority", "//example.com/proxy", "example.com"},
+		{"https URL with userinfo", "https://user:pw@example.com/proxy", "example.com"},
+		{"https URL with fragment", "https://example.com/proxy#frag", "example.com"},
+		{"IPv6 host", "https://[::1]:8443/proxy", "[::1]:8443"},
+		{"scheme without host", "https:///proxy", ""},
+		{"only fragment", "#fragment", ""},
+		{"only path", "/path", ""},
+		{"opaque scheme", "mailto:foo@example.com", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, gatewayHostPort(tt.raw))
+		})
+	}
+}
+
+func TestDisplayGatewayURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty", "", ""},
+		{"no userinfo", "https://example.com/proxy", "https://example.com/proxy"},
+		{"bare authority unchanged", "example.com:443", "example.com:443"},
+		{
+			name: "username only is masked",
+			raw:  "https://user@example.com/proxy",
+			want: "https://***@example.com/proxy",
+		},
+		{
+			name: "username and password are masked",
+			raw:  "https://user:supersecret@example.com:443/proxy?token=abc",
+			want: "https://***@example.com:443/proxy?token=abc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := displayGatewayURL(tt.raw)
+			assert.Equal(t, tt.want, got)
+			assert.NotContains(t, got, "supersecret",
+				"displayGatewayURL must not preserve a password")
+		})
+	}
+}
+
+func TestPrintModelsGateway(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		gateway string
+		want    string
+	}{
+		{
+			name:    "no gateway",
+			gateway: "",
+			want:    "Models gateway: none configured\n",
+		},
+		{
+			name:    "URL gateway shows allow-listed host",
+			gateway: "https://ai-backend-service-stage.docker.com/proxy",
+			want:    "Models gateway: https://ai-backend-service-stage.docker.com/proxy (allowlisting ai-backend-service-stage.docker.com in the sandbox proxy)\n",
+		},
+		{
+			name:    "bare authority is its own host",
+			gateway: "ai-backend-service.docker.com:443",
+			want:    "Models gateway: ai-backend-service.docker.com:443\n",
+		},
+		{
+			name:    "URL with credentials is rendered without them",
+			gateway: "https://user:supersecret@gw.example.com/proxy",
+			want:    "Models gateway: https://***@gw.example.com/proxy (allowlisting gw.example.com in the sandbox proxy)\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			printModelsGateway(&buf, tt.gateway)
+			assert.Equal(t, tt.want, buf.String())
+			assert.NotContains(t, buf.String(), "supersecret",
+				"printed gateway must never include credentials")
+		})
+	}
+}
+
+func TestAutoInstallHosts(t *testing.T) {
+	t.Parallel()
+
+	// Spot-check the static set: the package hosts the auto-installer
+	// reaches at runtime (Go module proxy, GitHub releases, the toolchain
+	// blob storage backing `go install`) must all be in the allowlist
+	// or the inner agent will see "403 Blocked by network policy" with
+	// no other diagnostic.
+	required := []string{
+		"github.com",
+		"api.github.com",
+		"raw.githubusercontent.com",
+		"objects.githubusercontent.com",
+		"proxy.golang.org",
+		"sum.golang.org",
+		"storage.googleapis.com",
+	}
+	for _, host := range required {
+		assert.Contains(t, autoInstallHosts, host,
+			"%s must be in autoInstallHosts so auto-install can reach it inside the sandbox", host)
+	}
+
+	// And the list itself must be commaless / spaceless: AllowHosts
+	// rejects entries that look like they could smuggle several rules
+	// past the policy engine.
+	for _, host := range autoInstallHosts {
+		assert.NotContains(t, host, ",", "%q must not contain a comma", host)
+		assert.NotContains(t, host, " ", "%q must not contain whitespace", host)
+	}
 }

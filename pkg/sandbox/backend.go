@@ -1,8 +1,12 @@
 package sandbox
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // Backend describes how to invoke sandbox CLI commands.
@@ -16,8 +20,23 @@ type Backend struct {
 	// extraEnv holds extra environment variables to set on every command.
 	extraEnv []string
 	// vmListKey is the JSON key returned by the "ls" command that holds
-	// the list of sandboxes ("vms" for docker sandbox, "sandboxes" for sbx).
+	// the list of sandboxes. Both supported backends now return
+	// "sandboxes"; the field stays for forward-compatibility if either
+	// backend ever drifts again.
 	vmListKey string
+	// rmExtraArgs is appended to every "rm" invocation. The sbx
+	// backend prompts for confirmation when stdin isn't a TTY — our
+	// rm calls are non-interactive (the user is just running another
+	// command), so we always pass "--force" there. The docker backend
+	// has no such prompt and accepts no --force flag.
+	rmExtraArgs []string
+	// allowHostsArgs builds the argv that adds an allow-network-host
+	// rule scoped to a single sandbox. The two backends spell the same
+	// operation differently — sbx exposes "sbx policy allow network
+	// SANDBOX HOSTS" while docker exposes "docker sandbox network
+	// proxy SANDBOX --allow-host HOST". Returning the args lets the
+	// shared exec wrapper handle env / logging the same way for both.
+	allowHostsArgs func(name string, hosts []string) []string
 }
 
 // NewBackend returns the appropriate backend.  When preferSbx is true
@@ -36,17 +55,92 @@ func dockerSandboxBackend() *Backend {
 	return &Backend{
 		program:   "docker",
 		prefix:    []string{"sandbox"},
-		vmListKey: "vms",
+		vmListKey: "sandboxes",
+		allowHostsArgs: func(name string, hosts []string) []string {
+			// docker sandbox network proxy SANDBOX --allow-host HOST [--allow-host HOST ...]
+			args := []string{"sandbox", "network", "proxy", name}
+			for _, h := range hosts {
+				args = append(args, "--allow-host", h)
+			}
+			return args
+		},
 	}
 }
 
 func sbxBackend() *Backend {
 	return &Backend{
-		program:   "sbx",
-		prefix:    nil,
-		extraEnv:  []string{"DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND="},
-		vmListKey: "sandboxes",
+		program:     "sbx",
+		prefix:      nil,
+		extraEnv:    []string{"DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND="},
+		vmListKey:   "sandboxes",
+		rmExtraArgs: []string{"--force"},
+		allowHostsArgs: func(name string, hosts []string) []string {
+			// sbx policy allow network SANDBOX comma,separated,hosts
+			return []string{"policy", "allow", "network", name, strings.Join(hosts, ",")}
+		},
 	}
+}
+
+// AllowHosts adds a sandbox-scoped network allow rule for each entry
+// in hosts. Hosts may carry an optional ":port" suffix (e.g.
+// "api.example.com:443"). Returns a non-fatal error: callers usually
+// log and continue, since a partial failure (e.g. a host already
+// allowed by an earlier rule) shouldn't keep the sandbox from
+// running.
+//
+// Empty entries are silently skipped. Entries that contain a comma
+// are rejected because the sbx backend joins the list with commas
+// when forwarding the rule to the policy engine; allowing them
+// through unescaped would let a single value smuggle several
+// distinct rules into the engine. Entries that contain a literal
+// space are rejected for the same defence-in-depth reason — callers
+// should pass already-split hostnames.
+func (b *Backend) AllowHosts(ctx context.Context, name string, hosts []string) error {
+	if name == "" {
+		return nil
+	}
+	if b.allowHostsArgs == nil {
+		return fmt.Errorf("backend %q does not support per-sandbox network allowlists", b.program)
+	}
+
+	cleaned := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if strings.ContainsAny(h, ", \t") {
+			return fmt.Errorf("refusing to allowlist host %q: contains comma or whitespace", h)
+		}
+		cleaned = append(cleaned, h)
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+
+	args := b.allowHostsArgs(name, cleaned)
+	cmd := exec.CommandContext(ctx, b.program, args...)
+	b.applyEnv(cmd)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %w (output: %s)", b.program, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	slog.DebugContext(ctx, "Allowed sandbox network access",
+		"sandbox", name, "hosts", cleaned, "output", strings.TrimSpace(string(out)))
+	return nil
+}
+
+// rm wraps a single "rm" invocation. It applies the backend's
+// non-interactive flags (e.g. --force for sbx) and returns the
+// combined output and any error. Stale or already-removed names
+// produce a non-nil error — callers usually log and continue.
+func (b *Backend) rm(ctx context.Context, name string) ([]byte, error) {
+	rmArgs := append([]string{"rm"}, b.rmExtraArgs...)
+	rmArgs = append(rmArgs, name)
+	cmd := exec.CommandContext(ctx, b.program, b.args(rmArgs[0], rmArgs[1:]...)...)
+	b.applyEnv(cmd)
+	return cmd.CombinedOutput()
 }
 
 // command builds an exec.Cmd for the given sandbox sub-command and arguments.
