@@ -52,8 +52,21 @@ func (s *Existing) HasWorkspace(dir string) bool {
 }
 
 // ForWorkspace returns the existing sandbox whose primary workspace
-// matches wd, or nil if none exists.
+// matches wd, or nil if none exists. When several sandboxes share the
+// same primary workspace (e.g. "foo" and "foo-1" left behind by a
+// previous run that couldn't rm cleanly), the first one returned by
+// the backend is picked.
 func (b *Backend) ForWorkspace(ctx context.Context, wd string) *Existing {
+	all := b.allForWorkspace(ctx, wd)
+	if len(all) == 0 {
+		return nil
+	}
+	return &all[0]
+}
+
+// allForWorkspace returns every existing sandbox whose primary
+// workspace matches wd, in backend-listing order.
+func (b *Backend) allForWorkspace(ctx context.Context, wd string) []Existing {
 	cmd := exec.CommandContext(ctx, b.program, b.args("ls", "--json")...)
 	b.applyEnv(cmd)
 	out, err := cmd.Output()
@@ -88,12 +101,13 @@ func (b *Backend) ForWorkspace(ctx context.Context, wd string) *Existing {
 		return nil
 	}
 
+	var matches []Existing
 	for _, entry := range entries {
 		if len(entry.Workspaces) > 0 && entry.Workspaces[0] == wd {
-			return &entry
+			matches = append(matches, entry)
 		}
 	}
-	return nil
+	return matches
 }
 
 // Ensure makes sure a sandbox exists for the given workspace,
@@ -118,27 +132,32 @@ func (b *Backend) Ensure(ctx context.Context, wd string, extras []string, templa
 		return "", err
 	}
 
-	existing := b.ForWorkspace(ctx, wd)
+	// Find every sandbox already attached to this workspace. After
+	// previous failed runs there may be more than one (the original
+	// foo, plus foo-1, foo-2 left behind by name-conflict suffixing
+	// when an earlier rm couldn't finish). We pick the first one that
+	// already has the mounts we need; the rest are stale and get
+	// removed before we create a fresh sandbox.
+	matches := b.allForWorkspace(ctx, wd)
 
-	// If the sandbox exists with the right mounts, reuse it.
-	if existing != nil &&
-		hasAllWorkspaces(existing, extras) &&
-		existing.HasWorkspace(configDir) {
-		slog.DebugContext(ctx, "Reusing existing sandbox", "name", existing.Name)
-		return existing.Name, nil
+	for _, candidate := range matches {
+		if hasAllWorkspaces(&candidate, extras) && candidate.HasWorkspace(configDir) {
+			slog.DebugContext(ctx, "Reusing existing sandbox", "name", candidate.Name)
+			return candidate.Name, nil
+		}
 	}
 
-	// Remove a stale sandbox whose mounts don't match. Errors are
-	// logged but not fatal: docker sandbox create has its own
-	// detection of name conflicts and will pick a fresh name (e.g.
-	// foo-1) on collision.
-	if existing != nil {
-		slog.DebugContext(ctx, "Removing existing sandbox to change workspace mounts", "name", existing.Name)
-		rmCmd := exec.CommandContext(ctx, b.program, b.args("rm", existing.Name)...)
-		b.applyEnv(rmCmd)
-		if rmOut, rmErr := rmCmd.CombinedOutput(); rmErr != nil {
-			slog.DebugContext(ctx, "Failed to remove existing sandbox",
-				"name", existing.Name, "error", rmErr, "output", strings.TrimSpace(string(rmOut)))
+	// Nothing reusable. Remove every stale sandbox bound to this
+	// workspace before creating a fresh one — if we leave any of them
+	// behind, "docker sandbox create" / "sbx create" will detect the
+	// name as taken and silently suffix the new sandbox with -1, -2,
+	// ... which then accumulate forever and confuse subsequent reuse
+	// lookups.
+	for _, stale := range matches {
+		slog.DebugContext(ctx, "Removing stale sandbox before recreate", "name", stale.Name)
+		if rmOut, rmErr := b.rm(ctx, stale.Name); rmErr != nil {
+			slog.WarnContext(ctx, "Failed to remove stale sandbox; the new one may end up with a name suffix",
+				"name", stale.Name, "error", rmErr, "output", strings.TrimSpace(string(rmOut)))
 		}
 	}
 
