@@ -194,9 +194,15 @@ var autoInstallHosts = []string{
 	"codeload.github.com",
 	"proxy.golang.org",
 	"sum.golang.org",
-	// `go install` downloads the Go toolchain from Google's blob
-	// storage when a module's go.mod pins a newer Go than the one
-	// already in the sandbox image.
+	// When a module pins a newer Go than the sandbox image ships,
+	// `go install` consults go.dev/dl/?mode=json to discover the
+	// available toolchains and downloads the archive from
+	// dl.google.com (which redirects to storage.googleapis.com).
+	// Without all three the toolchain switch fails with an opaque
+	// network-policy 403 — the symptom we saw with
+	// `gopls@v0.21.0` (requires Go 1.24) on a Go 1.23 sandbox image.
+	"go.dev",
+	"dl.google.com",
 	"storage.googleapis.com",
 }
 

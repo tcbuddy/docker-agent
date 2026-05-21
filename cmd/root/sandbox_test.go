@@ -204,6 +204,12 @@ func TestAutoInstallHosts(t *testing.T) {
 		"objects.githubusercontent.com",
 		"proxy.golang.org",
 		"sum.golang.org",
+		// Go toolchain bootstrap: a module pinning a newer Go than
+		// the sandbox image ships triggers a GOTOOLCHAIN=auto switch
+		// that hits go.dev (discovery) and dl.google.com /
+		// storage.googleapis.com (download).
+		"go.dev",
+		"dl.google.com",
 		"storage.googleapis.com",
 	}
 	for _, host := range required {
