@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/desktop"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/sandbox"
@@ -97,15 +98,20 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	if gateway := runConfig.ModelsGateway; gateway != "" {
 		envFlags = append(envFlags, "-e", envModelsGateway+"="+gateway)
 
-		// Forward the Docker Desktop token directly as -e DOCKER_TOKEN=<value>.
-		// The host-side SandboxTokenWriter writes a file under configDir for
-		// long-running sessions to pick up refreshed tokens, but the inner's
-		// startup check (config.CheckRequiredEnvVars) runs before the file
-		// path resolves correctly under --config-dir, so we also seed the
-		// initial value as an env var. The token rotates roughly once per
-		// hour; sessions longer than that will still pick up the refreshed
-		// value from the file as long as the inner can reach it.
-		if token, ok := envProvider.Get(ctx, environment.DockerDesktopTokenEnv); ok && token != "" {
+		// Forward a *fresh* Docker Desktop token directly as
+		// -e DOCKER_TOKEN=<value>. We deliberately bypass envProvider
+		// here: that chain consults the OS environment first, where any
+		// pre-existing DOCKER_TOKEN value is by definition stale (the
+		// gateway issues short-lived JWTs that expire roughly hourly).
+		// Going straight to the Docker Desktop backend gives us the
+		// same fresh token that [sandbox.StartTokenWriterIfNeeded]
+		// will keep refreshing in the background; seeding it as an env
+		// var lets the inner agent's startup check
+		// ([config.CheckRequiredEnvVars]) succeed even on existing
+		// sandbox images that read sandbox-tokens.json from the wrong
+		// path because of the persistent-pre-run bug fixed in
+		// pkg/cli/flags.go.
+		if token := desktop.GetToken(ctx); token != "" {
 			envFlags = append(envFlags, "-e", environment.DockerDesktopTokenEnv+"="+token)
 		}
 	}
