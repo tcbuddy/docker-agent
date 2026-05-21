@@ -16,7 +16,9 @@ type Backend struct {
 	// extraEnv holds extra environment variables to set on every command.
 	extraEnv []string
 	// vmListKey is the JSON key returned by the "ls" command that holds
-	// the list of sandboxes ("vms" for docker sandbox, "sandboxes" for sbx).
+	// the list of sandboxes. Both supported backends now return
+	// "sandboxes"; the field stays for forward-compatibility if either
+	// backend ever drifts again.
 	vmListKey string
 }
 
@@ -36,7 +38,7 @@ func dockerSandboxBackend() *Backend {
 	return &Backend{
 		program:   "docker",
 		prefix:    []string{"sandbox"},
-		vmListKey: "vms",
+		vmListKey: "sandboxes",
 	}
 }
 

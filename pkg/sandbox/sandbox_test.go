@@ -65,25 +65,34 @@ func TestForWorkspace(t *testing.T) {
 	}{
 		{
 			name:     "matching workspace",
-			json:     `{"vms":[{"name":"my-sandbox","workspaces":["/my/project"]}]}`,
+			json:     `{"sandboxes":[{"name":"my-sandbox","workspaces":["/my/project"]}]}`,
 			wd:       "/my/project",
 			wantName: "my-sandbox",
 		},
 		{
 			name: "no match",
-			json: `{"vms":[{"name":"other","workspaces":["/other/project"]}]}`,
+			json: `{"sandboxes":[{"name":"other","workspaces":["/other/project"]}]}`,
 			wd:   "/my/project",
 		},
 		{
 			name: "empty list",
-			json: `{"vms":[]}`,
+			json: `{"sandboxes":[]}`,
 			wd:   "/my/project",
 		},
 		{
 			name:     "multiple sandboxes",
-			json:     `{"vms":[{"name":"a","workspaces":["/a"]},{"name":"b","workspaces":["/b"]}]}`,
+			json:     `{"sandboxes":[{"name":"a","workspaces":["/a"]},{"name":"b","workspaces":["/b"]}]}`,
 			wd:       "/b",
 			wantName: "b",
+		},
+		{
+			name: "legacy vms key is no longer recognised",
+			// The docker backend used to return {"vms":[...]}; both
+			// backends now return "sandboxes". A response under the
+			// old key is treated as empty rather than silently used,
+			// to avoid masking a future drift.
+			json: `{"vms":[{"name":"my-sandbox","workspaces":["/my/project"]}]}`,
+			wd:   "/my/project",
 		},
 	}
 

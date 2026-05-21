@@ -61,8 +61,9 @@ func (b *Backend) ForWorkspace(ctx context.Context, wd string) *Existing {
 		return nil
 	}
 
-	// The JSON key differs between backends: "vms" for docker sandbox,
-	// "sandboxes" for sbx.
+	// The JSON key holding the list of sandboxes is "sandboxes" for
+	// both backends. We keep the lookup keyed on b.vmListKey for
+	// forward-compatibility.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil
@@ -134,12 +135,18 @@ func (b *Backend) Ensure(ctx context.Context, wd string, extras []string, templa
 		return existing.Name, nil
 	}
 
-	// Remove a stale sandbox whose mounts don't match.
+	// Remove a stale sandbox whose mounts don't match. Errors are
+	// logged but not fatal: docker sandbox create has its own
+	// detection of name conflicts and will pick a fresh name (e.g.
+	// foo-1) on collision.
 	if existing != nil {
 		slog.DebugContext(ctx, "Removing existing sandbox to change workspace mounts", "name", existing.Name)
 		rmCmd := exec.CommandContext(ctx, b.program, b.args("rm", existing.Name)...)
 		b.applyEnv(rmCmd)
-		_ = rmCmd.Run()
+		if rmOut, rmErr := rmCmd.CombinedOutput(); rmErr != nil {
+			slog.DebugContext(ctx, "Failed to remove existing sandbox",
+				"name", existing.Name, "error", rmErr, "output", strings.TrimSpace(string(rmOut)))
+		}
 	}
 
 	createExtra := []string{}
