@@ -117,13 +117,14 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		envVars = append(envVars, envModelsGateway+"="+gateway)
 	}
 
-	// Point the in-sandbox resolvers at the staged kit. We use the
-	// `-e KEY=VALUE` form so the value is set directly inside the
-	// container; we deliberately do not append it to envVars (which
-	// would set it on the host docker CLI process too — a path that
-	// only makes sense inside the sandbox).
+	// Point the in-sandbox resolvers at the staged kit. The sandbox CLI
+	// exposes extra workspaces at the same path as on the host, so we
+	// forward HostDir verbatim. We use the `-e KEY=VALUE` form so the
+	// value is set directly inside the container; we deliberately do not
+	// append it to envVars (which would set it on the host docker CLI
+	// process too — a path that only makes sense inside the sandbox).
 	if kitResult != nil {
-		envFlags = append(envFlags, "-e", skills.KitDirEnv+"="+kit.MountPath)
+		envFlags = append(envFlags, "-e", skills.KitDirEnv+"="+kitResult.HostDir)
 	}
 
 	dockerCmd := backend.BuildExecCmd(ctx, name, wd, dockerAgentArgs, envFlags, envVars)

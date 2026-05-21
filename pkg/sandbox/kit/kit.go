@@ -50,9 +50,6 @@ import (
 	"github.com/docker/docker-agent/pkg/skills"
 )
 
-// MountPath is the path at which the kit is bind-mounted inside the sandbox.
-const MountPath = "/agent-kit"
-
 // manifestFile is the on-disk name of the kit's table of contents.
 const manifestFile = "manifest.json"
 
@@ -91,9 +88,10 @@ type Options struct {
 // Result is what [Build] returns.
 type Result struct {
 	// HostDir is the absolute host path of the staged kit. Mount it
-	// read-only at [MountPath] inside the sandbox and forward
-	// `-e DOCKER_AGENT_KIT_DIR=<MountPath>` so the in-sandbox
-	// resolvers find it.
+	// read-only into the sandbox (the sandbox CLI exposes extras at
+	// the same path as on the host) and forward
+	// `-e DOCKER_AGENT_KIT_DIR=<HostDir>` so the in-sandbox resolvers
+	// find it.
 	HostDir string
 
 	// Manifest describes what was staged. It contains absolute host
