@@ -36,11 +36,13 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/docker/portcullis"
+	"github.com/fatih/color"
 
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
@@ -50,6 +52,17 @@ import (
 	"github.com/docker/docker-agent/pkg/promptfiles"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/toolinstall"
+)
+
+// Output styles for PrintSummary. fatih/color auto-disables when
+// stdout is not a TTY, so unit tests and piped output stay plain.
+var (
+	styleSection  = color.New(color.Bold).SprintFunc()
+	styleName     = color.New(color.Bold).SprintFunc()
+	styleHostPath = color.New(color.FgCyan).SprintFunc()
+	styleNote     = color.New(color.Faint).SprintFunc()
+	styleRedacted = color.New(color.FgYellow).SprintFunc()
+	styleCount    = color.New(color.Bold).SprintFunc()
 )
 
 // manifestFile is the on-disk name of the kit's table of contents.
@@ -695,38 +708,47 @@ func (r *Result) PrintSummary(w io.Writer) {
 		return
 	}
 
-	fmt.Fprintf(w, "Preparing docker-agent kit at %s\n", r.HostDir)
+	fmt.Fprintf(w, "Preparing docker-agent kit at %s\n", styleHostPath(r.HostDir))
 
 	if len(skillFiles) > 0 {
-		fmt.Fprintln(w, "  skills:")
+		fmt.Fprintf(w, "  %s\n", styleSection("skills:"))
 		for _, group := range skillFiles {
 			fmt.Fprintf(w, "    %s\n", displaySkillHeader(group.entry))
 			for _, file := range group.files {
-				mark := ""
-				if redacted[file] {
-					mark = " (redacted)"
-				}
 				rel := strings.TrimPrefix(file, group.entry.Target+string(filepath.Separator))
-				fmt.Fprintf(w, "      %s%s\n", rel, mark)
+				if redacted[file] {
+					fmt.Fprintf(w, "      %s %s\n", rel, styleRedacted("(redacted)"))
+				} else {
+					fmt.Fprintf(w, "      %s\n", rel)
+				}
 			}
 		}
 	}
 
 	if len(promptEntries) > 0 {
-		fmt.Fprintln(w, "  prompt files:")
+		fmt.Fprintf(w, "  %s\n", styleSection("prompt files:"))
 		for _, e := range promptEntries {
 			name := promptFileName(e)
 			notes := []string{"from " + pathx.ShortenHome(e.Source)}
+			isRedacted := false
 			if !e.IsStaged() {
 				notes = append(notes, "workspace mount")
 			} else if redacted[e.Target] {
 				notes = append(notes, "redacted")
+				isRedacted = true
 			}
-			fmt.Fprintf(w, "    %s (%s)\n", name, strings.Join(notes, ", "))
+			joined := strings.Join(notes, ", ")
+			paren := fmt.Sprintf("(%s)", joined)
+			if isRedacted {
+				paren = styleRedacted(paren)
+			} else {
+				paren = styleNote(paren)
+			}
+			fmt.Fprintf(w, "    %s %s\n", styleName(name), paren)
 		}
 	}
 
-	fmt.Fprintf(w, "  summary: %s\n", summaryCounts(len(skillFiles), len(promptEntries), len(r.Manifest.Redactions)))
+	fmt.Fprintf(w, "  %s %s\n", styleSection("summary:"), summaryCounts(len(skillFiles), len(promptEntries), len(r.Manifest.Redactions)))
 }
 
 // promptFileName returns the user-visible name for a prompt-file
@@ -780,9 +802,9 @@ func (r *Result) skillFilesGrouped() []skillGroup {
 func displaySkillHeader(e Entry) string {
 	name := filepath.Base(e.Target)
 	if e.Source == "" {
-		return name
+		return styleName(name)
 	}
-	return fmt.Sprintf("%s (from %s)", name, pathx.ShortenHome(e.Source))
+	return fmt.Sprintf("%s %s", styleName(name), styleNote(fmt.Sprintf("(from %s)", pathx.ShortenHome(e.Source))))
 }
 
 // summaryCounts formats the trailing line of PrintSummary.
@@ -790,16 +812,16 @@ func summaryCounts(skillCount, promptCount, redactionCount int) string {
 	parts := []string{plural(skillCount, "skill")}
 	parts = append(parts, plural(promptCount, "prompt file"))
 	if redactionCount > 0 {
-		parts = append(parts, plural(redactionCount, "secret")+" redacted")
+		parts = append(parts, styleRedacted(plural(redactionCount, "secret")+" redacted"))
 	}
 	return strings.Join(parts, ", ")
 }
 
 func plural(n int, what string) string {
 	if n == 1 {
-		return "1 " + what
+		return styleCount("1") + " " + what
 	}
-	return fmt.Sprintf("%d %ss", n, what)
+	return fmt.Sprintf("%s %ss", styleCount(strconv.Itoa(n)), what)
 }
 
 // needsAutoInstall reports whether cfg has at least one toolset that
