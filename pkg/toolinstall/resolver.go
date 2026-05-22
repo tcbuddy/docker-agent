@@ -102,8 +102,6 @@ func doInstall(ctx context.Context, command, versionRef string) (string, error) 
 		return binPath, nil
 	}
 
-	slog.InfoContext(ctx, "Auto-installing missing command via aqua registry", "command", command)
-
 	registry := SharedRegistry()
 
 	pkg, version, err := lookupPackage(ctx, registry, command, versionRef)
@@ -119,7 +117,8 @@ func doInstall(ctx context.Context, command, versionRef string) (string, error) 
 	}
 
 	pkgName := pkg.RepoOwner + "/" + pkg.RepoName
-	slog.InfoContext(ctx, "Installing tool", "command", command, "package", pkgName, "version", version)
+	slog.InfoContext(ctx, "Auto-installing missing command",
+		"command", command, "package", pkgName, "version", version)
 	announceInstall(command, pkgName, version)
 
 	binaryPath, err := registry.Install(ctx, pkg, version)
