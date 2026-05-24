@@ -64,6 +64,34 @@ docker agent run safe-coder
 An explicit `--sandbox=false` on the command line still wins, so you can opt
 out of the sandbox for a single run without touching the alias.
 
+### Bake the default into the agent config
+
+Agent authors can declare a sandbox default in the YAML itself. Any caller of
+the agent then gets the sandbox path automatically, without having to know
+(or remember) to pass `--sandbox`:
+
+```yaml
+# agent.yaml
+runtime:
+  sandbox: true
+
+agents:
+  root:
+    model: openai/gpt-4o
+    description: A helpful assistant
+    instruction: You are a helpful assistant.
+    toolsets:
+      - type: shell
+```
+
+```bash
+docker agent run agent.yaml   # runs in a sandbox automatically
+```
+
+The rule is the same as for aliases: an explicit `--sandbox=false` on the
+CLI overrides the config default, so you can debug an agent on the host
+without editing its YAML.
+
 ## Example
 
 ```yaml

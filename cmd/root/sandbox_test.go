@@ -2,6 +2,8 @@ package root
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -250,4 +252,46 @@ func TestPrintToolInstallAllowance(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPeekAgentSandbox(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "runtime sandbox true",
+			yaml: "runtime:\n  sandbox: true\nagents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n",
+			want: true,
+		},
+		{
+			name: "runtime sandbox false",
+			yaml: "runtime:\n  sandbox: false\nagents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n",
+			want: false,
+		},
+		{
+			name: "runtime block absent",
+			yaml: "agents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "agent.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tt.yaml), 0o600))
+
+			assert.Equal(t, tt.want, peekAgentSandbox(t.Context(), path))
+		})
+	}
+
+	t.Run("empty ref", func(t *testing.T) {
+		assert.False(t, peekAgentSandbox(t.Context(), ""))
+	})
+
+	t.Run("unresolvable ref", func(t *testing.T) {
+		assert.False(t, peekAgentSandbox(t.Context(), "/nonexistent/agent.yaml"))
+	})
 }

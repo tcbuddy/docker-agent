@@ -25,6 +25,26 @@ import (
 	"github.com/docker/docker-agent/pkg/skills"
 )
 
+// peekAgentSandbox returns true when the agent referenced by
+// agentRef declares runtime.sandbox: true in its config. It is
+// best-effort: any failure to resolve, load, or parse the config
+// returns false so the caller falls through to the normal path,
+// which will surface a proper error from the eventual load.
+func peekAgentSandbox(ctx context.Context, agentRef string) bool {
+	if agentRef == "" {
+		return false
+	}
+	source, err := config.Resolve(agentRef, nil)
+	if err != nil {
+		return false
+	}
+	cfg, err := config.Load(ctx, source)
+	if err != nil {
+		return false
+	}
+	return cfg.Runtime != nil && cfg.Runtime.Sandbox
+}
+
 // runInSandbox delegates the current command to a Docker sandbox.
 // It ensures a sandbox exists (creating or recreating as needed), then
 // executes docker agent inside it via the sandbox exec command.

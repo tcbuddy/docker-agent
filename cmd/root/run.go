@@ -179,6 +179,15 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		}
 	}
 
+	// Honour `runtime.sandbox: true` declared by the agent author.
+	// Best-effort: a config we can't peek at falls through to the
+	// normal path which will surface the load error properly.
+	if !f.sandbox && len(args) > 0 {
+		if peekAgentSandbox(ctx, args[0]) {
+			f.sandbox = true
+		}
+	}
+
 	if f.sandbox {
 		return runInSandbox(ctx, cmd, args, &f.runConfig, f.sandboxTemplate, f.sbx, f.noKit)
 	}
