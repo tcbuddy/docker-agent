@@ -1765,7 +1765,8 @@ func (m *appModel) AllBindings() []key.Binding {
 		),
 	)
 
-	if !m.leanMode && !m.hideSidebar {
+	// leanMode already returned above, so only hideSidebar matters here.
+	if !m.hideSidebar {
 		bindings = append(bindings, key.NewBinding(
 			key.WithKeys("ctrl+b"),
 			key.WithHelp("Ctrl+b", "toggle sidebar"),
