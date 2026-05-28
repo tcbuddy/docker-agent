@@ -1300,9 +1300,9 @@ func newUnmanagedOAuthTestServer(t *testing.T) *unmanagedOAuthTestServer {
 	return srv
 }
 
-// elicitCaptured records the elicitation request that the OAuth transport
-// sent and lets the test reply with a chosen payload, mirroring what a
-// real client (e.g. Docker Desktop) would do.
+// elicitCaptured records the elicitation request that the OAuth
+// transport sent and lets the test reply with a chosen payload,
+// mirroring what a real client would do.
 type elicitCaptured struct {
 	mu      sync.Mutex
 	req     *gomcp.ElicitParams
@@ -1543,6 +1543,147 @@ func TestUnmanagedOAuthFlow_LegacyMode_RejectsCodeStateReply(t *testing.T) {
 	}
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no redirect URI was configured")
+}
+
+// TestUnmanagedOAuthFlow_DriveFlow_AcceptsDirectCallback verifies the new
+// out-of-band path: the elicitation never replies (the client is a thin
+// courier that opens the browser and forwards the deeplink via
+// /api/mcp-oauth/callback). docker-agent's pending-OAuth registry
+// delivers {code, state} directly into the waiting flow, which then
+// exchanges the code at the token endpoint as on the regular drive-flow.
+func TestUnmanagedOAuthFlow_DriveFlow_AcceptsDirectCallback(t *testing.T) {
+	srv := newUnmanagedOAuthTestServer(t)
+	defer srv.Close()
+
+	const redirectURI = "https://example.test/oauth/cb"
+	// Block the elicitation handler indefinitely (until the test
+	// goroutine closes the channel below). This simulates an embedder
+	// that never sends a `ResumeElicitation` -- the deeplink relay goes
+	// straight to /api/mcp-oauth/callback instead.
+	elicitationCanReturn := make(chan struct{})
+	defer close(elicitationCanReturn)
+	capture := &elicitCaptured{}
+	stateSent := make(chan string, 1)
+	capture.replyFn = func(req *gomcp.ElicitParams) tools.ElicitationResult {
+		state, _ := req.Meta["cagent/state"].(string)
+		stateSent <- state
+		<-elicitationCanReturn
+		// This return value should be unreachable because the direct
+		// callback wins first and cancels the elicitation context. The
+		// real-world client's elicitation request returns ctx.Err() in
+		// that case; we mirror that with a decline so a bug that would
+		// otherwise consume this reply path is obvious in tests.
+		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}
+	}
+	transport, client := newUnmanagedTestTransport(t, srv.URL, redirectURI, capture)
+
+	// Run the OAuth flow on a separate goroutine; the main test goroutine
+	// will deliver the callback once the elicitation has been observed.
+	type roundTripResult struct {
+		resp *http.Response
+		err  error
+	}
+	rtCh := make(chan roundTripResult, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+		if err != nil {
+			rtCh <- roundTripResult{nil, err}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := transport.RoundTrip(req)
+		rtCh <- roundTripResult{resp, err}
+	}()
+
+	// Wait for the elicitation to be sent (so we know the registry has a
+	// waiter), then deliver the callback out of band.
+	var state string
+	select {
+	case state = <-stateSent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for elicitation to be sent")
+	}
+	require.NotEmpty(t, state)
+	require.NoError(t, DeliverPendingOAuthCallback(state, PendingOAuthCallback{Code: "abc"}))
+
+	// The RoundTrip goroutine should now complete.
+	var rt roundTripResult
+	select {
+	case rt = <-rtCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for OAuth flow to complete after direct callback")
+	}
+	require.NoError(t, rt.err)
+	require.NotNil(t, rt.resp)
+	rt.resp.Body.Close()
+	assert.Equal(t, http.StatusOK, rt.resp.StatusCode)
+
+	// Verify the same token-endpoint contract as the regular drive-flow.
+	require.Equal(t, int32(1), srv.tokenCalls.Load(), "token endpoint must be hit exactly once")
+	assert.Equal(t, "abc", srv.lastForm.Get("code"))
+	assert.Equal(t, redirectURI, srv.lastForm.Get("redirect_uri"))
+	assert.NotEmpty(t, srv.lastForm.Get("code_verifier"))
+
+	tok, err := client.tokenStore.GetToken(srv.URL)
+	require.NoError(t, err)
+	require.NotNil(t, tok)
+	assert.Equal(t, "exchanged-at", tok.AccessToken)
+}
+
+// TestUnmanagedOAuthFlow_DriveFlow_DirectCallbackError relays an OAuth
+// error (e.g. user denied consent) via the direct-callback path. The
+// flow must abort cleanly without hitting the token endpoint.
+func TestUnmanagedOAuthFlow_DriveFlow_DirectCallbackError(t *testing.T) {
+	srv := newUnmanagedOAuthTestServer(t)
+	defer srv.Close()
+
+	const redirectURI = "https://example.test/oauth/cb"
+	elicitationCanReturn := make(chan struct{})
+	defer close(elicitationCanReturn)
+	capture := &elicitCaptured{}
+	stateSent := make(chan string, 1)
+	capture.replyFn = func(req *gomcp.ElicitParams) tools.ElicitationResult {
+		state, _ := req.Meta["cagent/state"].(string)
+		stateSent <- state
+		<-elicitationCanReturn
+		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}
+	}
+	transport, _ := newUnmanagedTestTransport(t, srv.URL, redirectURI, capture)
+
+	rtErrCh := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+		if err != nil {
+			rtErrCh <- err
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		_, err = transport.RoundTrip(req)
+		rtErrCh <- err
+	}()
+
+	var state string
+	select {
+	case state = <-stateSent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for elicitation to be sent")
+	}
+	require.NoError(t, DeliverPendingOAuthCallback(state, PendingOAuthCallback{
+		Error:   "access_denied",
+		ErrDesc: "user declined",
+	}))
+
+	var rtErr error
+	select {
+	case rtErr = <-rtErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for OAuth flow to abort after direct callback error")
+	}
+	require.Error(t, rtErr)
+	assert.Contains(t, rtErr.Error(), "access_denied")
+	assert.Contains(t, rtErr.Error(), "user declined")
+	assert.Equal(t, int32(0), srv.tokenCalls.Load(),
+		"token endpoint must NOT be hit when the callback carries an error")
 }
 
 // TestUnmanagedRedirectURI_PerToolsetTakesPrecedence verifies the precedence

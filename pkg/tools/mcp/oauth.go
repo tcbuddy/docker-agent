@@ -974,29 +974,83 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		meta["cagent/state"] = expectedState
 	}
 
+	// On the docker-agent-driven path, register a waiter for an
+	// out-of-band callback. This lets an embedder POST the deeplink
+	// payload to /api/mcp-oauth/callback without going through the
+	// client's ResumeElicitation path -- the bearer never enters the
+	// embedder UI. Both delivery paths (elicitation result, direct
+	// callback) race; the first to arrive wins and the other is
+	// cancelled.
+	var callbackCh chan PendingOAuthCallback
+	if driveFlow {
+		callbackCh = make(chan PendingOAuthCallback, 1)
+		if err := defaultPendingOAuth.register(expectedState, callbackCh); err != nil {
+			return fmt.Errorf("failed to register pending oauth callback: %w", err)
+		}
+		defer defaultPendingOAuth.unregister(expectedState)
+	}
+
 	slog.DebugContext(ctx, "Sending OAuth elicitation request to client", "drive_flow", driveFlow)
 
-	result, err := t.client.requestElicitation(ctx, &mcpsdk.ElicitParams{
-		Message:         "OAuth authorization required for " + t.baseURL,
-		RequestedSchema: nil,
-		Meta:            meta,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to send elicitation request: %w", err)
+	// Run the elicitation request in a goroutine so we can also wait on
+	// the direct-callback channel. The elicitation goroutine is scoped to
+	// `elicCtx` -- when the direct callback wins we cancel elicCtx to
+	// release the goroutine, but the surrounding ctx (used for the token
+	// exchange below) stays alive.
+	type elicResult struct {
+		result tools.ElicitationResult
+		err    error
 	}
+	elicCh := make(chan elicResult, 1)
+	elicCtx, elicCancel := context.WithCancel(ctx)
+	defer elicCancel()
+	go func() {
+		r, e := t.client.requestElicitation(elicCtx, &mcpsdk.ElicitParams{
+			Message:         "OAuth authorization required for " + t.baseURL,
+			RequestedSchema: nil,
+			Meta:            meta,
+		})
+		elicCh <- elicResult{r, e}
+	}()
 
-	slog.DebugContext(ctx, "Received elicitation response from client", "action", result.Action)
-
-	if result.Action != tools.ElicitationActionAccept {
-		return errors.New("OAuth flow declined or cancelled by client")
-	}
-	if result.Content == nil {
-		return errors.New("no payload received from client")
+	var content map[string]any
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case cb := <-callbackCh:
+		// Direct deeplink callback won. Release the in-flight
+		// elicitation goroutine; any UI the embedder showed for this
+		// flow will be brought up to date by the authorization_event
+		// emitted via oauthSuccess() below.
+		elicCancel()
+		if cb.Error != "" {
+			msg := cb.Error
+			if cb.ErrDesc != "" {
+				msg = cb.Error + ": " + cb.ErrDesc
+			}
+			return fmt.Errorf("OAuth flow declined by provider: %s", msg)
+		}
+		slog.DebugContext(ctx, "OAuth callback received via deeplink, exchanging code for token")
+		// Synthesize the {code, state} payload that
+		// consumeUnmanagedElicitationReply expects.
+		content = map[string]any{"code": cb.Code, "state": expectedState}
+	case er := <-elicCh:
+		if er.err != nil {
+			return fmt.Errorf("failed to send elicitation request: %w", er.err)
+		}
+		slog.DebugContext(ctx, "Received elicitation response from client", "action", er.result.Action)
+		if tools.ElicitationAction(er.result.Action) != tools.ElicitationActionAccept {
+			return errors.New("OAuth flow declined or cancelled by client")
+		}
+		if er.result.Content == nil {
+			return errors.New("no payload received from client")
+		}
+		content = er.result.Content
 	}
 
 	token, err := t.consumeUnmanagedElicitationReply(
 		ctx,
-		result.Content,
+		content,
 		authServerMetadata,
 		resourceMetadata,
 		driveFlow,
