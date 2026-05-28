@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/echolog"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
 
@@ -89,6 +90,8 @@ func (s *Server) registerRoutes() {
 	group.POST("/sessions/batch/export", s.batchExportSessions)
 
 	group.GET("/agents/:id/:agent_name/tools/count", s.getAgentToolCount)
+
+	group.POST("/mcp-oauth/callback", s.mcpOAuthCallback)
 
 	group.GET("/ping", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
@@ -403,6 +406,52 @@ func (s *Server) elicitation(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to resume elicitation: %v", err))
 	}
 
+	return c.JSON(http.StatusOK, nil)
+}
+
+// mcpOAuthCallback is the out-of-band entry point used by embedders
+// that receive an OAuth deeplink (e.g. a system-wide URL-scheme handler
+// or an OS-integrated launcher) and want to forward the resulting
+// {code, state} to docker-agent without going through the session-keyed
+// ResumeElicitation path.
+//
+// The state value is opaque, high-entropy and was generated in-process by
+// docker-agent's unmanaged OAuth flow (see GenerateState in
+// pkg/tools/mcp). Looking it up in the pending-oauth registry IS the
+// authentication: docker-agent only accepts callbacks for states it is
+// currently awaiting. An unknown state returns 404 (which is the
+// expected outcome for replays and any state value the agent did not
+// itself generate).
+//
+// The handler never blocks: it hands the callback to the buffered
+// channel of the waiting flow and returns immediately. The token
+// exchange and storage happen inside that flow's goroutine, which then
+// emits the existing authorization_event on the session SSE stream.
+func (s *Server) mcpOAuthCallback(c echo.Context) error {
+	q := c.QueryParams()
+	state := q.Get("state")
+	if state == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "missing state query parameter")
+	}
+	code := q.Get("code")
+	errStr := q.Get("error")
+	errDesc := q.Get("error_description")
+	if code == "" && errStr == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "missing both code and error query parameters")
+	}
+
+	err := mcp.DeliverPendingOAuthCallback(state, mcp.PendingOAuthCallback{
+		Code:    code,
+		Error:   errStr,
+		ErrDesc: errDesc,
+	})
+	if errors.Is(err, mcp.ErrPendingOAuthNoWaiter) {
+		return echo.NewHTTPError(http.StatusNotFound, "no pending OAuth flow for the given state")
+	}
+	if err != nil {
+		slog.WarnContext(c.Request().Context(), "Failed to deliver pending oauth callback", "error", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to deliver pending oauth callback: %v", err))
+	}
 	return c.JSON(http.StatusOK, nil)
 }
 
