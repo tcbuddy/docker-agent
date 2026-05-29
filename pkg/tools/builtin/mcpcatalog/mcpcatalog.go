@@ -162,6 +162,17 @@ func (t *Toolset) filterCatalog() {
 	block := toIDSet(t.blockedServers)
 
 	if len(allow) > 0 || len(block) > 0 {
+		known := make(map[string]struct{}, len(t.catalog.Servers))
+		for _, s := range t.catalog.Servers {
+			known[s.ID] = struct{}{}
+		}
+		if unknown := unknownIDs(known, allow, block); len(unknown) > 0 {
+			// A typo in allowed_servers can silently leave an agent with an
+			// over-restricted (even empty) catalog, so surface it loudly.
+			slog.Warn("mcp_catalog allow/block list references unknown server id(s); they will be ignored",
+				"ids", unknown)
+		}
+
 		filtered := make([]Server, 0, len(t.catalog.Servers))
 		for _, s := range t.catalog.Servers {
 			if len(allow) > 0 {
@@ -182,6 +193,27 @@ func (t *Toolset) filterCatalog() {
 	for _, s := range t.catalog.Servers {
 		t.byID[s.ID] = s
 	}
+}
+
+// unknownIDs returns the sorted, de-duplicated ids present in the allow/block
+// sets but absent from the catalog (known). Used to warn about config typos.
+func unknownIDs(known map[string]struct{}, sets ...map[string]struct{}) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, set := range sets {
+		for id := range set {
+			if _, ok := known[id]; ok {
+				continue
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // toIDSet builds a lookup set from a list of server ids, dropping empty /
