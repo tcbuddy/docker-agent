@@ -1873,6 +1873,31 @@
             "type": "string"
           }
         },
+        "allowed_servers": {
+          "type": "array",
+          "description": "Allow-list of MCP catalog server ids offered by default (only valid for type 'mcp_catalog'). When non-empty, only these servers are searchable and enableable; every other catalog entry is hidden. Combine with 'blocked_servers' to subtract individual ids (block takes precedence). An empty or omitted list offers the full catalog.",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "duckduckgo",
+              "fetch"
+            ]
+          ]
+        },
+        "blocked_servers": {
+          "type": "array",
+          "description": "Block-list of MCP catalog server ids removed from the offered set (only valid for type 'mcp_catalog'). Applied after 'allowed_servers', so a server listed in both is blocked. An empty or omitted list disables the block-list.",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "shell"
+            ]
+          ]
+        },
         "models": {
           "type": "array",
           "description": "List of allowed models for the model_picker tool.",

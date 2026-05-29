@@ -921,6 +921,20 @@ type Toolset struct {
 	// both is rejected. An empty or omitted list disables the deny-list.
 	DenyList []string `json:"deny_list,omitempty" yaml:"deny_list,omitempty"`
 
+	// For the `mcp_catalog` tool - allow-list of catalog server ids that
+	// are offered by default. When non-empty, only these servers are
+	// searchable and enableable; every other catalog entry is hidden. An
+	// empty or omitted list offers the full catalog. Combine with
+	// `blocked_servers` to subtract individual ids from the allowed set
+	// (block takes precedence).
+	AllowedServers []string `json:"allowed_servers,omitempty" yaml:"allowed_servers,omitempty"`
+
+	// For the `mcp_catalog` tool - block-list of catalog server ids that
+	// are removed from the offered set. Applied after `allowed_servers`,
+	// so a server listed in both is blocked. An empty or omitted list
+	// disables the block-list.
+	BlockedServers []string `json:"blocked_servers,omitempty" yaml:"blocked_servers,omitempty"`
+
 	// For the `lsp` tool
 	FileTypes []string `json:"file_types,omitempty"`
 
