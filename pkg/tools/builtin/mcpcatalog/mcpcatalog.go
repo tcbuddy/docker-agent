@@ -107,23 +107,131 @@ var (
 	_ tools.OAuthCapable   = (*Toolset)(nil)
 )
 
+// Option customizes a Toolset at construction time.
+type Option func(*options)
+
+// options collects the construction-time settings supplied via Option. It is
+// consumed entirely within New, so nothing leaks onto the long-lived Toolset.
+type options struct {
+	allowedServers []string
+	blockedServers []string
+}
+
+// WithAllowedServers restricts the offered catalog to the given server ids.
+// When the list is non-empty, only these servers are searchable and
+// enableable; every other entry is hidden. An empty or nil list leaves the
+// full catalog in place.
+func WithAllowedServers(ids []string) Option {
+	return func(o *options) { o.allowedServers = ids }
+}
+
+// WithBlockedServers removes the given server ids from the offered catalog.
+// Block takes precedence over allow: a server present in both lists is
+// blocked.
+func WithBlockedServers(ids []string) Option {
+	return func(o *options) { o.blockedServers = ids }
+}
+
 // New returns a Toolset backed by the embedded catalog. envProvider is used
 // to resolve ${ENV_VAR} placeholders in catalog headers (e.g. the Apify
 // `Authorization: Bearer ${APIFY_API_KEY}` header) at enable time, mirroring
 // how a YAML-declared `mcp.remote` toolset works.
-func New(envProvider environment.Provider) *Toolset {
-	cat := MustLoad()
-	byID := make(map[string]Server, len(cat.Servers))
-	for _, s := range cat.Servers {
-		byID[s.ID] = s
+//
+// Optional WithAllowedServers / WithBlockedServers options narrow the set of
+// servers the toolset offers by default.
+func New(envProvider environment.Provider, opts ...Option) *Toolset {
+	var cfg options
+	for _, opt := range opts {
+		opt(&cfg)
 	}
-	return &Toolset{
-		catalog:          cat,
-		byID:             byID,
+
+	t := &Toolset{
+		catalog:          MustLoad(),
 		env:              envProvider,
 		enabled:          make(map[string]*tools.StartableToolSet),
 		removeOAuthToken: mcp.RemoveOAuthToken,
 	}
+	t.filterCatalog(cfg.allowedServers, cfg.blockedServers)
+	return t
+}
+
+// filterCatalog applies the allow/block lists to the embedded catalog,
+// rebuilding Servers, Count and the id index so the rest of the toolset only
+// ever sees the offered subset. Block takes precedence over allow. It always
+// runs (even with no filters) to populate byID.
+func (t *Toolset) filterCatalog(allowedServers, blockedServers []string) {
+	allow := toIDSet(allowedServers)
+	block := toIDSet(blockedServers)
+
+	if len(allow) > 0 || len(block) > 0 {
+		known := make(map[string]struct{}, len(t.catalog.Servers))
+		for _, s := range t.catalog.Servers {
+			known[s.ID] = struct{}{}
+		}
+		if unknown := unknownIDs(known, allow, block); len(unknown) > 0 {
+			// A typo in allowed_servers can silently leave an agent with an
+			// over-restricted (even empty) catalog, so surface it loudly.
+			slog.Warn("mcp_catalog allow/block list references unknown server id(s); they will be ignored",
+				"ids", unknown)
+		}
+
+		filtered := make([]Server, 0, len(t.catalog.Servers))
+		for _, s := range t.catalog.Servers {
+			if len(allow) > 0 {
+				if _, ok := allow[s.ID]; !ok {
+					continue
+				}
+			}
+			if _, ok := block[s.ID]; ok {
+				continue
+			}
+			filtered = append(filtered, s)
+		}
+		t.catalog.Servers = filtered
+		t.catalog.Count = len(filtered)
+	}
+
+	t.byID = make(map[string]Server, len(t.catalog.Servers))
+	for _, s := range t.catalog.Servers {
+		t.byID[s.ID] = s
+	}
+}
+
+// unknownIDs returns the sorted, de-duplicated ids present in the allow/block
+// sets but absent from the catalog (known). Used to warn about config typos.
+func unknownIDs(known map[string]struct{}, sets ...map[string]struct{}) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, set := range sets {
+		for id := range set {
+			if _, ok := known[id]; ok {
+				continue
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// toIDSet builds a lookup set from a list of server ids, dropping empty /
+// whitespace-only entries. Returns nil for an empty input so callers can
+// cheaply test len() == 0.
+func toIDSet(ids []string) map[string]struct{} {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			set[id] = struct{}{}
+		}
+	}
+	return set
 }
 
 // Describe returns a short, user-visible label for the /tools dialog.
