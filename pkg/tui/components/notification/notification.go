@@ -182,6 +182,7 @@ func (n *Manager) Update(msg tea.Msg) (Manager, tea.Cmd) {
 }
 
 func (n *Manager) handleShow(msg ShowMsg) (Manager, tea.Cmd) {
+	id := nextID.Add(1)
 	notifType := msg.Type
 	// Auto-detect error type for backward compatibility when Type is not set.
 	if notifType == TypeSuccess && msg.Text != "" {
@@ -191,17 +192,6 @@ func (n *Manager) handleShow(msg ShowMsg) (Manager, tea.Cmd) {
 		}
 	}
 
-	// Drop the notification if an identical one (same text and type) is
-	// already on screen. A persistent toolset-failure streak re-emits the
-	// same warning on every turn; without this guard those identical cards
-	// stack up and mask the viewport.
-	for _, item := range n.items {
-		if item.Text == msg.Text && item.Type == notifType {
-			return *n, nil
-		}
-	}
-
-	id := nextID.Add(1)
 	item := notificationItem{ID: id, Text: msg.Text, Type: notifType}
 	n.items = append([]notificationItem{item}, n.items...)
 
