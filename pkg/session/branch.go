@@ -81,21 +81,19 @@ func (s *Session) Clone() *Session {
 		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
 	}
 
-	clone.Messages = make([]Item, 0, len(s.Messages))
-	for _, item := range s.Messages {
-		switch {
-		case item.Message != nil:
-			clone.Messages = append(clone.Messages, Item{Message: cloneMessage(item.Message)})
-		case item.SubSession != nil:
-			sub, err := cloneSubSession(item.SubSession)
-			if err != nil {
-				continue
-			}
-			clone.Messages = append(clone.Messages, Item{SubSession: sub})
-		default:
-			// Summary/Cost/FirstKeptEntry are value fields; a shallow
-			// copy of the item is already a faithful clone.
-			clone.Messages = append(clone.Messages, item)
+	// Start from a shallow copy of each item so value fields (Summary,
+	// Cost, FirstKeptEntry) are preserved verbatim, then deep-copy the
+	// pointer fields so the clone shares no mutable state. Sub-sessions
+	// recurse through Clone to stay faithful (unlike BranchSession's
+	// helper, which mints fresh IDs and resets metadata).
+	clone.Messages = make([]Item, len(s.Messages))
+	for i, item := range s.Messages {
+		clone.Messages[i] = item
+		if item.Message != nil {
+			clone.Messages[i].Message = cloneMessage(item.Message)
+		}
+		if item.SubSession != nil {
+			clone.Messages[i].SubSession = item.SubSession.Clone()
 		}
 	}
 	return clone
@@ -199,6 +197,7 @@ func clonePermissionsConfig(src *PermissionsConfig) *PermissionsConfig {
 	}
 	return &PermissionsConfig{
 		Allow: cloneStringSlice(src.Allow),
+		Ask:   cloneStringSlice(src.Ask),
 		Deny:  cloneStringSlice(src.Deny),
 	}
 }

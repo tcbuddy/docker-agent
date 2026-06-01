@@ -30,7 +30,7 @@ func TestClone_CopiesScalarFields(t *testing.T) {
 		InputTokens:             11,
 		OutputTokens:            22,
 		Cost:                    1.5,
-		Permissions:             &PermissionsConfig{Allow: []string{"a"}, Deny: []string{"d"}},
+		Permissions:             &PermissionsConfig{Allow: []string{"a"}, Ask: []string{"k"}, Deny: []string{"d"}},
 		AgentModelOverrides:     map[string]string{"root": "openai/gpt-4o"},
 		CustomModelsUsed:        []string{"openai/gpt-4o"},
 		AttachedFiles:           []string{"/abs/path.txt"},
@@ -60,12 +60,16 @@ func TestClone_CopiesScalarFields(t *testing.T) {
 	assert.Equal(t, "root", clone.AgentName)
 	assert.Equal(t, "parent", clone.ParentID)
 	assert.Equal(t, "hello", clone.GetLastUserMessageContent())
+	require.NotNil(t, clone.Permissions)
+	assert.Equal(t, []string{"a"}, clone.Permissions.Allow)
+	assert.Equal(t, []string{"k"}, clone.Permissions.Ask)
+	assert.Equal(t, []string{"d"}, clone.Permissions.Deny)
 }
 
 func TestClone_DeepCopiesMessagesAndConfig(t *testing.T) {
 	orig := &Session{
 		ID:                  "sess-1",
-		Permissions:         &PermissionsConfig{Allow: []string{"a"}},
+		Permissions:         &PermissionsConfig{Allow: []string{"a"}, Ask: []string{"k"}},
 		AgentModelOverrides: map[string]string{"root": "m1"},
 		CustomModelsUsed:    []string{"m1"},
 		AttachedFiles:       []string{"/abs/a.txt"},
@@ -83,12 +87,14 @@ func TestClone_DeepCopiesMessagesAndConfig(t *testing.T) {
 
 	// Mutate the clone's deep-copied structures; the original must not change.
 	clone.Permissions.Allow[0] = "mutated"
+	clone.Permissions.Ask[0] = "mutated"
 	clone.AgentModelOverrides["root"] = "mutated"
 	clone.CustomModelsUsed[0] = "mutated"
 	clone.AttachedFiles[0] = "/abs/mutated.txt"
 	clone.Messages[0].Message.Message.MultiContent[0].ImageURL.URL = "http://mutated"
 
 	assert.Equal(t, "a", orig.Permissions.Allow[0])
+	assert.Equal(t, "k", orig.Permissions.Ask[0])
 	assert.Equal(t, "m1", orig.AgentModelOverrides["root"])
 	assert.Equal(t, "m1", orig.CustomModelsUsed[0])
 	assert.Equal(t, "/abs/a.txt", orig.AttachedFiles[0])
@@ -126,4 +132,22 @@ func TestClone_PreservesSubSessionAndSummary(t *testing.T) {
 	assert.Equal(t, "sub message", clone.Messages[1].SubSession.GetLastUserMessageContent())
 	assert.Equal(t, "a summary", clone.Messages[2].Summary)
 	assert.InEpsilon(t, 0.25, clone.Messages[2].Cost, 1e-9)
+}
+
+// TestClone_PreservesItemValueFields guards against a clone that rebuilds
+// items field-by-field and silently drops the per-item Cost / FirstKeptEntry
+// that can ride alongside a message.
+func TestClone_PreservesItemValueFields(t *testing.T) {
+	orig := New()
+	orig.Messages = []Item{{
+		Message:        UserMessage("hello"),
+		Cost:           0.5,
+		FirstKeptEntry: 3,
+	}}
+
+	clone := orig.Clone()
+	require.Len(t, clone.Messages, 1)
+	assert.Equal(t, "hello", clone.Messages[0].Message.Message.Content)
+	assert.InEpsilon(t, 0.5, clone.Messages[0].Cost, 1e-9)
+	assert.Equal(t, 3, clone.Messages[0].FirstKeptEntry)
 }
