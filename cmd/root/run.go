@@ -22,17 +22,26 @@ import (
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/input"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/profiling"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tui"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
+	"github.com/docker/docker-agent/pkg/worktree"
 )
+
+// worktreeAutoName is the value stored when --worktree is given without an
+// explicit name (cobra's NoOptDefVal). It also doubles as the reserved name a
+// user can pass explicitly (--worktree=auto) to request a generated name; with
+// cobra's optional-value flags the two are indistinguishable by design.
+const worktreeAutoName = "auto"
 
 type runExecFlags struct {
 	agentName         string
@@ -57,6 +66,9 @@ type runExecFlags struct {
 	sbx               bool
 	noKit             bool
 	agentPickerSpec   string
+	worktree          bool
+	worktreeName      string
+	worktreePR        string
 
 	// Exec only
 	exec          bool
@@ -155,12 +167,22 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().BoolVar(&flags.noKit, "no-kit", false, "Do not stage a docker-agent kit (skills, prompt files) when running in a sandbox")
 	cmd.PersistentFlags().StringVar(&flags.agentPickerSpec, "agent-picker", "", "Show a full-screen picker to choose an agent before launching. Optional comma-separated list of agent refs (defaults to \"default,coder\")")
 	cmd.PersistentFlags().Lookup("agent-picker").NoOptDefVal = strings.Join(defaultAgentPickerRefs, ",")
+	cmd.PersistentFlags().StringVarP(&flags.worktreeName, "worktree", "w", "", "Run the agent in a fresh git worktree of the working directory (isolates changes from your checkout). Optionally name it: --worktree=my-name")
+	cmd.PersistentFlags().Lookup("worktree").NoOptDefVal = worktreeAutoName
+	cmd.PersistentFlags().StringVar(&flags.worktreePR, "worktree-pr", "", "Run the agent in a git worktree checked out on an existing GitHub pull request (number or URL). Continues the PR's branch; requires the GitHub CLI (gh).")
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")
 	cmd.MarkFlagsMutuallyExclusive("remote", "sandbox")
 	cmd.MarkFlagsMutuallyExclusive("remote", "session-db")
 	cmd.MarkFlagsMutuallyExclusive("remote", "session")
 	cmd.MarkFlagsMutuallyExclusive("remote", "record")
 	cmd.MarkFlagsMutuallyExclusive("remote", "fake")
+	// A worktree is a local directory: it has no meaning for a remote runtime
+	// and is not wired through the sandbox boundary.
+	cmd.MarkFlagsMutuallyExclusive("remote", "worktree")
+	cmd.MarkFlagsMutuallyExclusive("sandbox", "worktree")
+	cmd.MarkFlagsMutuallyExclusive("remote", "worktree-pr")
+	cmd.MarkFlagsMutuallyExclusive("sandbox", "worktree-pr")
+	cmd.MarkFlagsMutuallyExclusive("worktree", "worktree-pr")
 
 	// --exec only
 	cmd.PersistentFlags().BoolVar(&flags.exec, "exec", false, "Execute without a TUI")
@@ -232,8 +254,16 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 
 	if f.sandbox {
+		if cmd.Flags().Changed("worktree") || cmd.Flags().Changed("worktree-pr") {
+			return errors.New("--worktree/--worktree-pr cannot be combined with a sandboxed run")
+		}
 		return runInSandbox(ctx, cmd, args, &f.runConfig, f.sandboxTemplate, f.sbx, f.noKit, agentCfg)
 	}
+
+	// --worktree was provided (with or without a value). The string flag lets
+	// users name the worktree (--worktree=my-name); without a value cobra
+	// stores the sentinel that triggers a random name.
+	f.worktree = cmd.Flags().Changed("worktree")
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 
@@ -348,6 +378,27 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	wd, _ := os.Getwd()
+	createdWorktree, err := f.setupWorktree(ctx, wd)
+	if err != nil {
+		if loadResult != nil {
+			stopToolSets(loadResult.Team)
+		}
+		return err
+	}
+	if createdWorktree != nil {
+		wd = createdWorktree.Dir
+		f.runConfig.WorkingDir = createdWorktree.Dir
+		out.Println("Using git worktree: " + createdWorktree.Dir + " (branch " + createdWorktree.Branch + ")")
+		// loadResult is nil for the remote backend; worktrees are mutually
+		// exclusive with --remote so this is belt-and-suspenders, matching
+		// the nil-guard used for cleanup throughout this function.
+		if loadResult != nil {
+			if err := f.dispatchWorktreeCreate(ctx, out, loadResult.Team, createdWorktree); err != nil {
+				stopToolSets(loadResult.Team)
+				return err
+			}
+		}
+	}
 	rt, sess, cleanup, err := b.CreateSession(ctx, loadResult, b.CreateSessionRequest(wd))
 	if err != nil {
 		return err
@@ -355,6 +406,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	defer cleanup()
 
 	if !useTUI {
+		// Non-interactive (--exec) runs never clean up the worktree: there
+		// is no safe moment to prompt, and silently discarding work would
+		// be surprising. The worktree is left in place for later inspection.
 		return f.handleExecMode(ctx, out, rt, sess, args)
 	}
 
@@ -380,7 +434,173 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		opts = append(opts, hookOpt)
 	}
 
-	return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(), opts...)
+	if err := runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(), opts...); err != nil {
+		// On a TUI error we deliberately leave the worktree in place rather
+		// than risk discarding work after an abnormal exit.
+		return err
+	}
+
+	// The interactive session is over. Offer to clean up the worktree we
+	// created for it (never a pre-existing one, since Create only makes new
+	// worktrees). Shut the session down first so tools release any file
+	// handles inside the worktree before we try to remove it; cleanup is
+	// idempotent, so the deferred call above becomes a no-op.
+	//
+	// A fresh context is used because the TUI may have exited via a
+	// canceled ctx (Ctrl-C), which would otherwise abort the prompt and
+	// the git commands.
+	if createdWorktree != nil {
+		cleanup()
+		f.cleanupWorktree(context.WithoutCancel(ctx), out, createdWorktree)
+	}
+	return nil
+}
+
+// setupWorktree creates the git worktree requested by --worktree or
+// --worktree-pr, returning nil when neither was given. The returned worktree
+// (when non-nil) becomes the session's working directory and is cleaned up
+// when an interactive run ends.
+func (f *runExecFlags) setupWorktree(ctx context.Context, wd string) (*worktree.Worktree, error) {
+	switch {
+	case f.worktreePR != "":
+		wt, err := worktree.CreatePR(ctx, wd, f.worktreePR)
+		if err != nil {
+			switch {
+			case errors.Is(err, worktree.ErrNotGitRepository):
+				return nil, fmt.Errorf("--worktree-pr requires %s to be inside a git repository", wd)
+			case errors.Is(err, worktree.ErrInvalidPRRef):
+				return nil, fmt.Errorf("invalid --worktree-pr value: %w", err)
+			case errors.Is(err, worktree.ErrGHNotFound):
+				return nil, fmt.Errorf("--worktree-pr requires the GitHub CLI: %w", err)
+			default:
+				return nil, err
+			}
+		}
+		return wt, nil
+
+	case f.worktree:
+		name := f.worktreeName
+		if name == worktreeAutoName {
+			name = ""
+		}
+		wt, err := worktree.Create(ctx, wd, name)
+		if err != nil {
+			switch {
+			case errors.Is(err, worktree.ErrNotGitRepository):
+				return nil, fmt.Errorf("--worktree requires %s to be inside a git repository", wd)
+			case errors.Is(err, worktree.ErrInvalidName):
+				return nil, fmt.Errorf("invalid --worktree name: %w", err)
+			default:
+				return nil, err
+			}
+		}
+		return wt, nil
+
+	default:
+		return nil, nil
+	}
+}
+
+// cleanupWorktree removes a worktree created for an interactive run once it
+// ends. A clean worktree (no uncommitted changes, untracked files, or new
+// commits) is removed automatically. A dirty one is kept unless the user
+// explicitly asks to remove it, so work is never discarded silently.
+// Failures are reported but never abort the command — the run already
+// succeeded.
+func (f *runExecFlags) cleanupWorktree(ctx context.Context, out *cli.Printer, wt *worktree.Worktree) {
+	st, err := wt.Status(ctx)
+	if err != nil {
+		out.Println("Could not inspect git worktree " + wt.Dir + ": " + err.Error())
+		out.Println("Leaving it in place. Remove it manually with: git -C " + wt.SourceDir + " worktree remove " + wt.Dir)
+		return
+	}
+
+	if st.IsDirty() {
+		if !promptRemoveDirtyWorktree(ctx, out, wt, st) {
+			out.Println("Keeping git worktree " + wt.Dir + " (branch " + wt.Branch + ").")
+			return
+		}
+	}
+
+	if err := wt.Remove(ctx); err != nil {
+		out.Println("Failed to remove git worktree " + wt.Dir + ": " + err.Error())
+		return
+	}
+	out.Println("Removed git worktree " + wt.Dir + " (branch " + wt.Branch + ").")
+}
+
+// promptRemoveDirtyWorktree asks the user whether to discard a worktree that
+// still holds work. It defaults to keeping (returns false) on any non-yes
+// answer or read error, so uncommitted work is never lost by accident.
+func promptRemoveDirtyWorktree(ctx context.Context, out *cli.Printer, wt *worktree.Worktree, st worktree.Status) bool {
+	var held []string
+	if st.Modified {
+		held = append(held, "uncommitted changes")
+	}
+	if st.Untracked {
+		held = append(held, "untracked files")
+	}
+	if st.NewCommits {
+		held = append(held, "new commits")
+	}
+
+	out.Println("\nThe git worktree " + wt.Dir + " (branch " + wt.Branch + ") still has " + strings.Join(held, ", ") + ".")
+	out.Println("Remove it and discard this work? Keeping preserves the directory and branch so you can return later. (y/N):")
+
+	response, err := input.ReadLine(ctx, os.Stdin)
+	if err != nil {
+		return false
+	}
+	response = strings.TrimSpace(strings.ToLower(response))
+	return response == "y" || response == "yes"
+}
+
+// dispatchWorktreeCreate fires the worktree_create hooks of the agent the
+// run targets, just after the worktree is created and before the session
+// exists. Unlike every other event, this is dispatched from the CLI rather
+// than the run loop: the worktree (and the working directory the runtime,
+// session, tools and snapshot machinery all capture) must be settled first.
+// Hooks run inside the new worktree so setup commands (copy .env, install
+// deps) operate on the fresh checkout. A blocking verdict aborts the run.
+func (f *runExecFlags) dispatchWorktreeCreate(ctx context.Context, out *cli.Printer, t *team.Team, wt *worktree.Worktree) error {
+	agt, err := t.AgentOrDefault(f.agentName)
+	if err != nil {
+		return err
+	}
+	hooksCfg := agt.Hooks()
+	if hooksCfg == nil {
+		return nil
+	}
+
+	executor := hooks.NewExecutor(hooksCfg, wt.Dir, os.Environ())
+	if !executor.Has(hooks.EventWorktreeCreate) {
+		return nil
+	}
+
+	result, err := executor.Dispatch(ctx, hooks.EventWorktreeCreate, &hooks.Input{
+		AgentName:         agt.Name(),
+		Cwd:               wt.Dir,
+		WorktreePath:      wt.Dir,
+		WorktreeBranch:    wt.Branch,
+		WorktreeSourceDir: wt.SourceDir,
+	})
+	if err != nil {
+		return fmt.Errorf("running worktree_create hooks: %w", err)
+	}
+	if result.SystemMessage != "" {
+		out.Println(result.SystemMessage)
+	}
+	if result.AdditionalContext != "" {
+		out.Println(result.AdditionalContext)
+	}
+	if !result.Allowed {
+		msg := result.Message
+		if msg == "" {
+			msg = "a worktree_create hook blocked the run"
+		}
+		return fmt.Errorf("worktree_create hook aborted the run: %s", msg)
+	}
+	return nil
 }
 
 func (f *runExecFlags) loadAgentFrom(ctx context.Context, req runtime.LoadTeamRequest) (*teamloader.LoadResult, error) {
