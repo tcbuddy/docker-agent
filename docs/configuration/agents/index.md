@@ -97,7 +97,7 @@ agents:
 | `hooks`                     | object  | ✗        | Lifecycle hooks for running commands at various points. See [Hooks]({{ '/configuration/hooks/' | relative_url }}).                                                                                   |
 | `structured_output`         | object  | ✗        | Constrain agent output to match a JSON schema. See [Structured Output]({{ '/configuration/structured-output/' | relative_url }}).                                                                    |
 | `cache`                     | object  | ✗        | Response cache. When the same user question is asked again, the previous answer is replayed verbatim and the model is not called. See [Response Cache](#response-cache) below.                  |
-| `harness`                   | object  | ✗        | Run this agent through an external coding CLI instead of a model. See [Coding Harnesses]({{ '/features/harnesses/' | relative_url }}). |
+| `harness`                   | object  | ✗        | Run this agent through an external coding CLI instead of a model. **Note:** Any `toolsets:` defined on the same agent are silently ignored when `harness:` is set — the external CLI brings its own tools. See [Coding Harnesses]({{ '/features/harnesses/' | relative_url }}). |
 
 <div class="callout callout-warning" markdown="1">
 <div class="callout-title">max_iterations

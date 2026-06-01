@@ -89,18 +89,18 @@ agents:
       Dispatch the frontend and backend tasks in parallel,
       then collect results and produce a summary.
     sub_agents:
-      - frontend_coder
-      - backend_coder
+      - claude-coder
+      - codex-coder
     toolsets:
       - type: background_agents
 
-  frontend_coder:
+  claude-coder:
     description: Frontend specialist (Claude Code)
     harness:
       type: claude-code
       effort: medium
 
-  backend_coder:
+  codex-coder:
     description: Backend specialist (Codex)
     harness:
       type: codex

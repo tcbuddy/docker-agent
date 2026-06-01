@@ -21,7 +21,7 @@ Each agent has its own model, tools, and instructions — optimized for its spec
 
 ## Two Patterns: Delegation vs. Handoffs
 
-docker-agent supports two multi-agent patterns:
+Docker Agent supports two multi-agent patterns:
 
 | | **Delegation** (`sub_agents`) | **Handoffs** (`handoffs`) |
 |---|---|---|
@@ -232,22 +232,22 @@ agents:
     instruction: |
       Break down coding tasks and delegate to the coding agents.
     sub_agents:
-      - claude_coder
-      - codex_coder
+      - claude-coder
+      - codex-coder
 
-  claude_coder:
+  claude-coder:
     description: Claude Code specialist
     harness:
       type: claude-code
       effort: high
 
-  codex_coder:
+  codex-coder:
     description: Codex specialist
     harness:
       type: codex
 ```
 
-The orchestrator uses `transfer_task` to send work to a harness sub-agent just like any other sub-agent. docker-agent handles the orchestration and hooks; the external CLI drives the coding loop.
+The orchestrator uses `transfer_task` to send work to a harness sub-agent just like any other sub-agent. Docker Agent handles the orchestration and hooks; the external CLI drives the coding loop.
 
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">Learn more
@@ -383,8 +383,8 @@ toolsets:
 - **Choose the right pattern** — Use `sub_agents` for hierarchical task delegation, `handoffs` for pipeline workflows and conversational routing
 
 <div class="callout callout-info" markdown="1">
-<div class="callout-title">Beyond docker-agent
+<div class="callout-title">Beyond Docker Agent
 </div>
-  <p>For interoperability with other agent frameworks, docker-agent supports the <a href="{{ '/features/a2a/' | relative_url }}">A2A protocol</a> and can expose agents via <a href="{{ '/features/mcp-mode/' | relative_url }}">MCP Mode</a>.</p>
+  <p>For interoperability with other agent frameworks, Docker Agent supports the <a href="{{ '/features/a2a/' | relative_url }}">A2A protocol</a> and can expose agents via <a href="{{ '/features/mcp-mode/' | relative_url }}">MCP Mode</a>.</p>
 
 </div>

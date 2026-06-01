@@ -10,31 +10,31 @@ _Delegate coding tasks to external AI coding CLIs (Claude Code, Codex, opencode)
 
 ## Overview
 
-A **harness** agent delegates its work to an external coding CLI — `claude` (Claude Code), `codex` (OpenAI Codex), `opencode`, or `pi` — instead of calling a model API directly. The external CLI drives the coding loop while docker-agent provides orchestration, hooks, permissions, and distribution.
+A **harness** agent delegates its work to an external coding CLI — `claude` (Claude Code), `codex` (OpenAI Codex), `opencode`, or `pi` — instead of calling a model API directly. The external CLI drives the coding loop while Docker Agent provides orchestration, hooks, permissions, and distribution.
 
 This pattern gives you the best of both worlds:
 
 - **External CLI strengths** — deep IDE integration, specialized coding workflows, CLI-native tool access
-- **docker-agent strengths** — multi-agent coordination, hook-based auditing and policy enforcement, permission controls, OCI distribution, and the full agent config schema
+- **Docker Agent strengths** — multi-agent coordination, hook-based auditing and policy enforcement, permission controls, OCI distribution, and the full agent config schema
 
 <div class="callout callout-info" markdown="1">
 <div class="callout-title">When to use harnesses
 </div>
-  <p>Use a harness when you want a Claude Code / Codex / opencode session to act as a sub-agent inside a larger docker-agent workflow — for example, an orchestrator that plans work and delegates coding tasks to specialized harness agents.</p>
+  <p>Use a harness when you want a Claude Code / Codex / opencode session to act as a sub-agent inside a larger Docker Agent workflow — for example, an orchestrator that plans work and delegates coding tasks to specialized harness agents.</p>
 </div>
 
 ## Prerequisites
 
-The external CLI must be installed and available on `PATH` before starting docker-agent:
+The external CLI must be installed and available on `PATH` before starting Docker Agent:
 
 | Harness type | Required binary | Install |
 | --- | --- | --- |
 | `claude-code` | `claude` | [docs.anthropic.com/en/docs/claude-code](https://docs.anthropic.com/en/docs/claude-code) |
 | `codex` | `codex` | [github.com/openai/codex](https://github.com/openai/codex) |
 | `opencode` | `opencode` | [opencode.ai](https://opencode.ai) |
-| `pi` | `pi` | [pi.ai/talk](https://pi.ai/talk) |
+| `pi` | `pi` | Refer to the `pi` CLI documentation for installation instructions. |
 
-docker-agent will report an error at session start if the required binary is not found.
+Docker Agent will report an error at session start if the required binary is not found.
 
 ## Configuration
 
@@ -96,21 +96,21 @@ agents:
 
 ## What Does NOT Work
 
-Harness agents bypass the docker-agent model pipeline entirely. As a result:
+Harness agents bypass the Docker Agent model pipeline entirely. As a result:
 
-- **docker-agent toolsets are inactive.** The external CLI provides its own tools — filesystem, shell, etc. Any `toolsets:` defined on a harness agent are ignored.
-- **`model:` routing is unavailable.** The harness CLI manages model selection; docker-agent's `models:` configuration and routing rules do not apply to harness agents.
-- **Token usage tracking is unavailable.** The CLI drives the loop, so docker-agent cannot count tokens.
+- **Docker Agent toolsets are inactive.** The external CLI provides its own tools — filesystem, shell, etc. Any `toolsets:` defined on a harness agent are silently ignored.
+- **`model:` routing is unavailable.** The harness CLI manages model selection; Docker Agent's `models:` configuration and routing rules do not apply to harness agents.
+- **Token usage tracking depends on the external CLI.** Docker Agent records usage when the CLI reports it (Claude Code and Codex both report usage data). If the CLI does not emit usage data, the session will show zero token usage.
 
 <div class="callout callout-warning" markdown="1">
-<div class="callout-title">No docker-agent toolsets inside a harness
+<div class="callout-title">No Docker Agent toolsets inside a harness
 </div>
-  <p>Do not configure <code>toolsets:</code> on a harness agent — they are silently ignored. If you need docker-agent toolsets alongside external coding capabilities, use a standard sub-agent with <code>transfer_task</code> rather than a harness.</p>
+  <p>Do not configure <code>toolsets:</code> on a harness agent — they are silently ignored. If you need Docker Agent toolsets alongside external coding capabilities, use a standard sub-agent with <code>transfer_task</code> rather than a harness.</p>
 </div>
 
 ## Hook Behavior
 
-Hooks work normally on harness agents. However, events that depend on the model pipeline (such as `before_llm_call` or `after_llm_call`) will not fire because the external CLI owns the model calls.
+Hooks work normally on harness agents, including `before_llm_call` and `after_llm_call`. `before_llm_call` runs before the prompt is forwarded to the external CLI and can block or rewrite the run; `after_llm_call` fires after the CLI returns its final response.
 
 The `model_id` field in hook payloads is set to the harness label (e.g. `claude-code`) rather than a canonical `provider/model` string. This applies to `before_llm_call`, `after_llm_call`, and any other event that carries `model_id`.
 
@@ -137,16 +137,16 @@ agents:
       focused tasks and delegate each task to the most appropriate
       coding agent. Collect results and synthesize a final summary.
     sub_agents:
-      - claude_coder
-      - codex_coder
+      - claude-coder
+      - codex-coder
 
-  claude_coder:
+  claude-coder:
     description: Claude Code specialist for complex refactors
     harness:
       type: claude-code
       effort: high
 
-  codex_coder:
+  codex-coder:
     description: Codex specialist for code generation
     harness:
       type: codex
@@ -174,18 +174,18 @@ agents:
       Use background agents to run multiple coding tasks at once.
       Dispatch all tasks, then collect results when each finishes.
     sub_agents:
-      - frontend_coder
-      - backend_coder
+      - claude-coder
+      - codex-coder
     toolsets:
       - type: background_agents
 
-  frontend_coder:
+  claude-coder:
     description: Frontend specialist (Claude Code)
     harness:
       type: claude-code
       effort: medium
 
-  backend_coder:
+  codex-coder:
     description: Backend specialist (Codex)
     harness:
       type: codex

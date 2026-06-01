@@ -171,8 +171,8 @@ The `allowed_domains`, `blocked_domains`, and `allow_private_ips` options let yo
 **Key points:**
 
 - `allowed_domains` — allow-list; only listed hosts (and their subdomains for bare-domain entries) are reachable
-- `blocked_domains` — deny-list; takes priority over allowed; cannot be combined with `allowed_domains`
+- `blocked_domains` — deny-list; mutually exclusive with `allowed_domains` (a config error is thrown if both are set)
 - `allow_private_ips` — defaults to `false`; set to `true` to reach loopback / RFC-1918 / link-local addresses
-- The same `allow_private_ips` flag applies to [remote MCP toolsets]({{ '/tools/mcp/' | relative_url }}) when their OAuth helper needs to reach internal servers
+- The same `allow_private_ips` flag is also supported on `api`, `openapi`, `a2a`, and remote `mcp` toolsets
 
 See [`examples/fetch_domain_filtering.yaml`](https://github.com/docker/docker-agent/blob/main/examples/fetch_domain_filtering.yaml) for a complete filtering example, and [`examples/remote_mcp_allow_private_ips.yaml`](https://github.com/docker/docker-agent/blob/main/examples/remote_mcp_allow_private_ips.yaml) for the equivalent pattern on remote MCP toolsets.
