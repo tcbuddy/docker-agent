@@ -107,11 +107,19 @@ func (s *ToolSet) FindSkill(name string) *skills.Skill {
 // ReadSkillContent returns the content of a skill's SKILL.md by name.
 // For local skills, it expands any !`command` patterns in the content by
 // executing the commands and replacing the patterns with their stdout output.
-// Command expansion is disabled for remote skills to prevent arbitrary code execution.
+// Command expansion is disabled for remote and inline skills to prevent
+// arbitrary code execution.
 func (s *ToolSet) ReadSkillContent(ctx context.Context, name string) (string, error) {
 	skill := s.findSkill(name)
 	if skill == nil {
 		return "", fmt.Errorf("skill %q not found", name)
+	}
+
+	// Inline skills carry their body in memory; there is no file to read and
+	// no command expansion (their content comes from the trusted agent config
+	// author, but we keep behaviour identical to remote skills for safety).
+	if skill.IsInline() {
+		return skill.InlineContent, nil
 	}
 
 	content, err := readFileContent(skill.FilePath)
