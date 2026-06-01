@@ -66,6 +66,26 @@ func TestNotification_HideByID(t *testing.T) {
 	require.Equal(t, "second", updated.items[0].Text)
 }
 
+func TestNotification_DeduplicatesIdenticalPersistent(t *testing.T) {
+	n := New()
+	updated, cmd1 := n.Update(ShowMsg{Text: "toolset down", Type: TypeWarning})
+	require.Len(t, updated.items, 1)
+	require.NotNil(t, cmd1)
+
+	// Re-emitting the identical notification must be dropped, not stacked.
+	updated, cmd2 := updated.Update(ShowMsg{Text: "toolset down", Type: TypeWarning})
+	require.Len(t, updated.items, 1)
+	require.Nil(t, cmd2)
+
+	// A different text is a distinct notification and is shown.
+	updated, _ = updated.Update(ShowMsg{Text: "other failure", Type: TypeWarning})
+	require.Len(t, updated.items, 2)
+
+	// Same text but different type is also distinct.
+	updated, _ = updated.Update(ShowMsg{Text: "toolset down", Type: TypeInfo})
+	require.Len(t, updated.items, 3)
+}
+
 func TestNotification_DismissByID(t *testing.T) {
 	n := New()
 	updated, _ := n.Update(ShowMsg{Text: "dismiss me", Type: TypeWarning})

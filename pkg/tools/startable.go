@@ -34,11 +34,14 @@ func DescribeToolSet(ts ToolSet) string {
 // StartableToolSet wraps a ToolSet with lazy, single-flight start semantics.
 // This is the canonical way to manage toolset lifecycle.
 //
-// It also de-duplicates start-failure warnings: when Start() fails repeatedly
+// It also de-duplicates failure warnings: when Start() fails repeatedly
 // (e.g. an MCP server is down), only the *first* failure of each streak is
 // reported via ShouldReportFailure(). A successful Start() automatically
 // clears the streak, so a future failure is again reported as fresh — no
-// caller-visible "recovery" event is needed.
+// caller-visible "recovery" event is needed. The same once-per-streak guard
+// applies to Tools() listing failures via ShouldReportListFailure(); a remote
+// MCP server stuck returning "toolset not started" therefore surfaces a single
+// warning per streak instead of one on every conversation turn.
 type StartableToolSet struct {
 	ToolSet
 
@@ -46,6 +49,9 @@ type StartableToolSet struct {
 	started         bool
 	inFailureStreak bool // true between the first failed Start and the next successful Start (or Stop)
 	pendingWarning  bool // true if the current streak's first failure has not yet been reported
+
+	inListFailureStreak bool // true between the first failed Tools() and the next successful Tools() (or Stop)
+	listPendingWarning  bool // true if the current list-failure streak's first failure has not yet been reported
 }
 
 // NewStartable wraps a ToolSet for lazy initialization.
@@ -93,6 +99,30 @@ func (s *StartableToolSet) Start(ctx context.Context) error {
 	return nil
 }
 
+// Tools lists the underlying toolset's tools and tracks listing-failure
+// streaks so callers can de-duplicate warnings via ShouldReportListFailure().
+// A successful listing clears the streak so a future failure is reported as
+// fresh.
+func (s *StartableToolSet) Tools(ctx context.Context) ([]Tool, error) {
+	ta, err := s.ToolSet.Tools(ctx)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		// Queue a warning ONLY on the first failure of a streak so
+		// repeated retries don't re-queue duplicate warnings.
+		if !s.inListFailureStreak {
+			s.inListFailureStreak = true
+			s.listPendingWarning = true
+		}
+		return nil, err
+	}
+
+	s.inListFailureStreak = false
+	s.listPendingWarning = false
+	return ta, nil
+}
+
 // Stop stops the toolset if it implements Startable and resets
 // the started flag so that a subsequent Start will re-initialize.
 func (s *StartableToolSet) Stop(ctx context.Context) error {
@@ -102,6 +132,8 @@ func (s *StartableToolSet) Stop(ctx context.Context) error {
 	s.started = false
 	s.inFailureStreak = false
 	s.pendingWarning = false
+	s.inListFailureStreak = false
+	s.listPendingWarning = false
 	if startable, ok := As[Startable](s.ToolSet); ok {
 		return startable.Stop(ctx)
 	}
@@ -119,6 +151,20 @@ func (s *StartableToolSet) ShouldReportFailure() bool {
 		return false
 	}
 	s.pendingWarning = false
+	return true
+}
+
+// ShouldReportListFailure returns true exactly once per Tools() listing-failure
+// streak — after the first failed listing and before the streak ends (a
+// successful Tools() or Stop()). Subsequent calls return false until a new
+// streak begins. Calling it when no failure is pending always returns false.
+func (s *StartableToolSet) ShouldReportListFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.listPendingWarning {
+		return false
+	}
+	s.listPendingWarning = false
 	return true
 }
 
