@@ -1,0 +1,16 @@
+version: "11"
+
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+    max_tokens: 64000
+
+skills:
+  bad:
+    - name: broken
+      instructions: "do the thing"
+
+agents:
+  dev:
+    model: model
