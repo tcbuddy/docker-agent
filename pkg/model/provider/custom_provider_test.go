@@ -428,6 +428,62 @@ func TestApplyProviderDefaults_DefaultsAPIType(t *testing.T) {
 	assert.Equal(t, "openai_chatcompletions", result.ProviderOpts["api_type"])
 }
 
+// TestApplyProviderDefaults_DefaultsResponsesAPIForNewerModels verifies that a
+// custom OpenAI-compatible provider with no explicit api_type defaults to the
+// Responses API for models that require it (gpt-5, Codex, o-series), while
+// older chat models stay on Chat Completions. Without this, a provider pointed
+// at the OpenAI/GitHub Copilot API rejects newer models on /chat/completions
+// with a 400. See https://github.com/docker/docker-agent/issues/2303.
+func TestApplyProviderDefaults_DefaultsResponsesAPIForNewerModels(t *testing.T) {
+	t.Parallel()
+
+	customProviders := map[string]latest.ProviderConfig{
+		// OpenAI-compatible provider (e.g. a github-copilot endpoint defined in
+		// the providers: section) without an explicit api_type.
+		"copilot": {
+			BaseURL:  "https://api.githubcopilot.com",
+			TokenKey: "GITHUB_TOKEN",
+		},
+	}
+
+	tests := []struct {
+		name            string
+		model           string
+		expectedAPIType string
+	}{
+		{name: "codex routes to responses", model: "gpt-5.3-codex", expectedAPIType: "openai_responses"},
+		{name: "gpt-5 routes to responses", model: "gpt-5", expectedAPIType: "openai_responses"},
+		{name: "o-series routes to responses", model: "o3-mini", expectedAPIType: "openai_responses"},
+		{name: "gpt-4o stays on chat completions", model: "gpt-4o", expectedAPIType: "openai_chatcompletions"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := applyProviderDefaults(&latest.ModelConfig{Provider: "copilot", Model: tt.model}, customProviders)
+			assert.Equal(t, tt.expectedAPIType, result.ProviderOpts["api_type"])
+		})
+	}
+}
+
+// TestApplyProviderDefaults_ExplicitAPITypeWinsOverModel verifies that an
+// explicit provider-level api_type is honored even for a model that would
+// otherwise default to the Responses API.
+func TestApplyProviderDefaults_ExplicitAPITypeWinsOverModel(t *testing.T) {
+	t.Parallel()
+
+	customProviders := map[string]latest.ProviderConfig{
+		"pinned": {
+			APIType:  "openai_chatcompletions",
+			BaseURL:  "https://api.example.com/v1",
+			TokenKey: "KEY",
+		},
+	}
+
+	result := applyProviderDefaults(&latest.ModelConfig{Provider: "pinned", Model: "gpt-5.3-codex"}, customProviders)
+	assert.Equal(t, "openai_chatcompletions", result.ProviderOpts["api_type"])
+}
+
 // TestResolveProviderTypeFromConfig tests the provider type resolution logic
 func TestResolveProviderTypeFromConfig(t *testing.T) {
 	t.Parallel()
