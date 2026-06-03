@@ -176,7 +176,7 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 	// where restarting would be wrong (plugin metadata handshake, shell
 	// completion) and always falls back to the current binary on any failure.
 	if selfupdate.Enabled() && !isManagementInvocation(args) {
-		selfupdate.Run(ctx, stderr)
+		selfupdate.Run(ctx, stdin, stderr)
 	}
 
 	rootCmd := NewRootCmd()

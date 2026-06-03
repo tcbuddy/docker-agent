@@ -137,6 +137,7 @@ func newTestUpdater(t *testing.T, srv *httptest.Server, currentVer, exePath stri
 		},
 		reExec:  capt.fn,
 		install: installExecutable,
+		confirm: func(io.Reader, io.Writer, string, string) bool { return true },
 	}, capt
 }
 
@@ -169,7 +170,7 @@ func TestTryUpdateSuccess(t *testing.T) {
 	u, capt := newTestUpdater(t, srv, "v1.0.0", exePath)
 
 	var stderr strings.Builder
-	require.NoError(t, u.tryUpdate(t.Context(), &stderr))
+	require.NoError(t, u.tryUpdate(t.Context(), nil, &stderr))
 
 	// The on-disk binary was replaced with the downloaded payload.
 	got, err := os.ReadFile(exePath)
@@ -182,6 +183,34 @@ func TestTryUpdateSuccess(t *testing.T) {
 	assert.Contains(t, capt.env, envReExecMarker+"=1")
 }
 
+func TestTryUpdateDeclinedDoesNotUpdate(t *testing.T) {
+	payload := []byte("#!/bin/sh\necho new binary\n")
+	srv := newFakeRelease(t, "v2.0.0", payload, true)
+
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "docker-agent")
+	require.NoError(t, os.WriteFile(exePath, []byte("old binary"), 0o755))
+
+	u, capt := newTestUpdater(t, srv, "v1.0.0", exePath)
+	u.confirm = func(io.Reader, io.Writer, string, string) bool { return false }
+
+	var stderr strings.Builder
+	require.NoError(t, u.tryUpdate(t.Context(), nil, &stderr))
+
+	assert.False(t, capt.called, "declining must not re-exec")
+	got, _ := os.ReadFile(exePath)
+	assert.Equal(t, "old binary", string(got), "binary must be untouched when declined")
+}
+
+func TestConfirmUpdateNonInteractiveAutoConfirms(t *testing.T) {
+	t.Parallel()
+
+	// A non-*os.File reader (e.g. a pipe in CI) is non-interactive: auto-confirm.
+	var stderr strings.Builder
+	assert.True(t, confirmUpdate(strings.NewReader(""), &stderr, "v1.0.0", "v2.0.0"))
+	assert.Empty(t, stderr.String(), "must not prompt in a non-interactive session")
+}
+
 func TestTryUpdateAlreadyLatest(t *testing.T) {
 	srv := newFakeRelease(t, "v1.0.0", []byte("x"), true)
 
@@ -192,7 +221,7 @@ func TestTryUpdateAlreadyLatest(t *testing.T) {
 	u, capt := newTestUpdater(t, srv, "v1.0.0", exePath)
 
 	var stderr strings.Builder
-	require.NoError(t, u.tryUpdate(t.Context(), &stderr))
+	require.NoError(t, u.tryUpdate(t.Context(), nil, &stderr))
 
 	assert.False(t, capt.called, "should not re-exec when already up to date")
 	got, _ := os.ReadFile(exePath)
@@ -209,7 +238,7 @@ func TestTryUpdateDevVersionNeverUpdates(t *testing.T) {
 	u, capt := newTestUpdater(t, srv, devVersion, exePath)
 
 	var stderr strings.Builder
-	err := u.tryUpdate(t.Context(), &stderr)
+	err := u.tryUpdate(t.Context(), nil, &stderr)
 	require.Error(t, err, "dev builds must not be replaced")
 	assert.False(t, capt.called)
 }
@@ -239,7 +268,7 @@ func TestTryUpdateChecksumMismatch(t *testing.T) {
 	u.DownloadBaseURL = bad.URL
 
 	var stderr strings.Builder
-	err := u.tryUpdate(t.Context(), &stderr)
+	err := u.tryUpdate(t.Context(), nil, &stderr)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "checksum mismatch")
 	assert.False(t, capt.called)
@@ -260,7 +289,7 @@ func TestTryUpdateMissingChecksumFailsClosed(t *testing.T) {
 	u, capt := newTestUpdater(t, srv, "v1.0.0", exePath)
 
 	var stderr strings.Builder
-	err := u.tryUpdate(t.Context(), &stderr)
+	err := u.tryUpdate(t.Context(), nil, &stderr)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "checksums.txt")
 	assert.False(t, capt.called)
@@ -284,7 +313,7 @@ func TestTryUpdateReExecFailureRestoresPreviousBinary(t *testing.T) {
 	}
 
 	var stderr strings.Builder
-	err := u.tryUpdate(t.Context(), &stderr)
+	err := u.tryUpdate(t.Context(), nil, &stderr)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "re-executing updated binary")
 
@@ -311,7 +340,7 @@ func TestTryUpdateDownloadNotFound(t *testing.T) {
 	u, capt := newTestUpdater(t, srv, "v1.0.0", exePath)
 
 	var stderr strings.Builder
-	err := u.tryUpdate(t.Context(), &stderr)
+	err := u.tryUpdate(t.Context(), nil, &stderr)
 	require.Error(t, err)
 	assert.False(t, capt.called)
 	got, _ := os.ReadFile(exePath)
@@ -333,7 +362,7 @@ func TestRunSwallowsErrors(t *testing.T) {
 	u, capt := newTestUpdater(t, srv, "v1.0.0", exePath)
 
 	var stderr strings.Builder
-	u.run(t.Context(), &stderr) // must not panic
+	u.run(t.Context(), nil, &stderr) // must not panic
 	assert.False(t, capt.called)
 	assert.Contains(t, stderr.String(), "self-update failed")
 }

@@ -12,6 +12,7 @@
 package selfupdate
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/mattn/go-isatty"
 
 	"github.com/docker/docker-agent/pkg/atomicfile"
 )
@@ -94,6 +96,11 @@ type Updater struct {
 	// path, args and env. On success it does not return on Unix; on Windows it
 	// exits the process with the child's status. Overridable in tests.
 	reExec func(path string, args, env []string) error
+
+	// confirm asks the user whether to install the available update. It returns
+	// true to proceed. In non-interactive sessions it must auto-confirm.
+	// Overridable in tests.
+	confirm func(stdin io.Reader, stderr io.Writer, current, latest string) bool
 }
 
 // New returns an Updater configured for the docker-agent GitHub repository,
@@ -111,6 +118,7 @@ func New(currentVersion string) *Updater {
 		resolveExecutable: resolveExecutable,
 		install:           installExecutable,
 		reExec:            reExecProcess,
+		confirm:           confirmUpdate,
 	}
 }
 
@@ -128,22 +136,25 @@ func Enabled() bool {
 // re-executes the new binary (and does not return on Unix); on any failure or
 // when already up to date it returns so the caller can continue with the
 // current binary. Progress and failures are reported to stderr and slog.
-func Run(ctx context.Context, stderr io.Writer) {
+//
+// When a newer release is available and the session is interactive, the user
+// is prompted to confirm the upgrade; non-interactive sessions auto-confirm.
+func Run(ctx context.Context, stdin io.Reader, stderr io.Writer) {
 	if !Enabled() {
 		return
 	}
-	New(currentVersion()).run(ctx, stderr)
+	New(currentVersion()).run(ctx, stdin, stderr)
 }
 
 // run is the testable core. It logs and swallows every error.
-func (u *Updater) run(ctx context.Context, stderr io.Writer) {
-	if err := u.tryUpdate(ctx, stderr); err != nil {
+func (u *Updater) run(ctx context.Context, stdin io.Reader, stderr io.Writer) {
+	if err := u.tryUpdate(ctx, stdin, stderr); err != nil {
 		slog.WarnContext(ctx, "Self-update skipped; continuing with current binary", "error", err)
 		fmt.Fprintf(stderr, "docker-agent: self-update failed (%v); continuing with current version\n", err)
 	}
 }
 
-func (u *Updater) tryUpdate(ctx context.Context, stderr io.Writer) error {
+func (u *Updater) tryUpdate(ctx context.Context, stdin io.Reader, stderr io.Writer) error {
 	current, err := semver.NewVersion(u.CurrentVersion)
 	if err != nil {
 		// "dev" and other non-release versions land here. Never clobber a
@@ -164,6 +175,11 @@ func (u *Updater) tryUpdate(ctx context.Context, stderr io.Writer) error {
 
 	if !latest.GreaterThan(current) {
 		slog.DebugContext(ctx, "Already on the latest version", "current", u.CurrentVersion, "latest", release.Tag)
+		return nil
+	}
+
+	if !u.confirm(stdin, stderr, u.CurrentVersion, release.Tag) {
+		slog.DebugContext(ctx, "User declined self-update", "current", u.CurrentVersion, "latest", release.Tag)
 		return nil
 	}
 
@@ -542,6 +558,43 @@ func atomicWriteFromFile(dst, src string) error {
 	}
 	defer f.Close()
 	return atomicfile.Write(dst, f, 0o755)
+}
+
+// confirmUpdate asks the user whether to install the available update. On a
+// non-interactive session (stdin is not a terminal, e.g. CI or piped input) it
+// auto-confirms so automation keeps working. On an interactive session it
+// prompts and treats anything other than an explicit "yes" as a decline.
+func confirmUpdate(stdin io.Reader, stderr io.Writer, current, latest string) bool {
+	if !isInteractive(stdin) {
+		return true
+	}
+
+	fmt.Fprintf(stderr, "An update is available (%s). Do you want to install it or continue with version %s? [Y/n] ", latest, current)
+
+	line, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && line == "" {
+		// Could not read an answer (EOF on an empty line): be conservative and
+		// keep running the current version rather than upgrading unprompted.
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+// isInteractive reports whether stdin is a terminal we can prompt on. A
+// non-*os.File reader (e.g. tests) or a non-terminal file descriptor (pipe,
+// redirect, CI) is treated as non-interactive.
+func isInteractive(stdin io.Reader) bool {
+	f, ok := stdin.(*os.File)
+	if !ok {
+		return false
+	}
+	return isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd())
 }
 
 // isTruthy reports whether s represents an enabled boolean flag.

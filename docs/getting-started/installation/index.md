@@ -80,7 +80,7 @@ export DOCKER_AGENT_AUTO_UPDATE=1
 docker agent run
 ```
 
-With self-updates enabled, docker-agent checks the latest GitHub release before normal commands run. If a newer release exists, it downloads the asset for your OS and architecture, verifies the release-provided SHA-256 digest/checksum, replaces the current binary, and restarts the command with the same arguments.
+With self-updates enabled, docker-agent checks the latest GitHub release before normal commands run. If a newer release exists and your session is interactive, docker-agent asks whether you want to install it or keep running your current version. When the answer is yes (or the session is non-interactive, such as CI or piped input, in which case the update proceeds automatically), it downloads the asset for your OS and architecture, verifies the release-provided SHA-256 digest/checksum, replaces the current binary, and restarts the command with the same arguments.
 
 Self-updates are fail-safe: if checking, downloading, verifying, installing, or restarting fails, docker-agent keeps running the current binary. Version/help/completion commands and Docker CLI plugin metadata handshakes do not trigger self-updates.
 
