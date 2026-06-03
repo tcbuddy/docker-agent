@@ -32,6 +32,25 @@ func resolveEffectiveProvider(cfg latest.ProviderConfig) string {
 	return cmp.Or(cfg.Provider, "openai")
 }
 
+// defaultOpenAIAPIType returns the api_type to default to for an
+// OpenAI-compatible provider that did not specify one explicitly.
+//
+// Newer OpenAI models (gpt-4.1, the o-series, gpt-5 and Codex) are only
+// served via the Responses API; the legacy Chat Completions endpoint rejects
+// them with a 400 ("unsupported_api_for_model"). Built-in providers (openai,
+// github-copilot) get this routing for free via the client's per-request
+// auto-detection, but custom providers in the providers: section bypass that
+// path because an explicit api_type pins the endpoint. Defaulting on the same
+// modelinfo.SupportsResponsesAPI predicate keeps both paths consistent so a
+// provider pointed at the OpenAI/Copilot API works without a manual
+// api_type override. See https://github.com/docker/docker-agent/issues/2303.
+func defaultOpenAIAPIType(model string) string {
+	if modelinfo.SupportsResponsesAPI(model) {
+		return "openai_responses"
+	}
+	return "openai_chatcompletions"
+}
+
 // isOpenAICompatibleProvider returns true if the provider type uses the OpenAI API protocol.
 func isOpenAICompatibleProvider(providerType string) bool {
 	switch providerType {
@@ -123,13 +142,13 @@ func mergeFromProviderConfig(dst *latest.ModelConfig, src latest.ProviderConfig)
 	}
 
 	// Set api_type in ProviderOpts if not already set.
-	// Prefer the explicit APIType from the provider config; otherwise default to
-	// openai_chatcompletions for OpenAI-compatible providers.
+	// Prefer the explicit APIType from the provider config; otherwise pick a
+	// default for OpenAI-compatible providers based on the model.
 	switch {
 	case src.APIType != "":
 		setProviderOptIfAbsent(dst, "api_type", src.APIType)
 	case isOpenAICompatibleProvider(resolveEffectiveProvider(src)):
-		setProviderOptIfAbsent(dst, "api_type", "openai_chatcompletions")
+		setProviderOptIfAbsent(dst, "api_type", defaultOpenAIAPIType(dst.Model))
 	}
 }
 
