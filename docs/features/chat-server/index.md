@@ -147,6 +147,14 @@ Cached conversations are evicted after `--conversation-ttl` of inactivity, or
 when the cache hits `--conversations-max` items (oldest entries are evicted
 first).
 
+### Failure-safe caching
+
+When a request fails — for example because the model returns an error or the `--request-timeout` expires — the conversation cache is **not updated**. The server clones the cached session before processing each request and only commits the updated session when the turn completes successfully. This means:
+
+- A failed turn leaves the conversation in the same state it was before the request.
+- Clients can safely retry with the same `X-Conversation-Id` after a failure.
+- Transient errors do not corrupt the conversation history.
+
 ## Authentication
 
 The chat server has **no authentication by default**. To require a Bearer
