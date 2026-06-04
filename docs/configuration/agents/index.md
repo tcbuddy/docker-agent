@@ -264,6 +264,8 @@ agents:
 
 Define reusable prompt shortcuts that can send prompts to the current agent or switch to a different sub-agent:
 
+> **Note:** Named slash commands execute immediately, even while the agent is processing another message. Unlike regular chat messages (which are queued), slash commands interrupt the current operation and run right away.
+
 ```yaml
 agents:
   root:
