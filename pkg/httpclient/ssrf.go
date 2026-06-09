@@ -28,10 +28,10 @@ var cgnatRange = mustCIDR("100.64.0.0/10")
 // blockedIPv6Prefixes are IPv6 ranges that embed or forward arbitrary IPv4
 // addresses and must therefore be treated as non-public.
 var blockedIPv6Prefixes = []*net.IPNet{
-	mustCIDR("2002::/16"),        // RFC 3056  – 6to4 (bits 16-47 = IPv4)
-	mustCIDR("64:ff9b::/96"),     // RFC 6052  – NAT64 well-known
-	mustCIDR("64:ff9b:1::/48"),   // RFC 8215  – NAT64 local-use
-	mustCIDR("fec0::/10"),        // RFC 3879  – site-local (deprecated)
+	mustCIDR("2002::/16"),      // RFC 3056  – 6to4 (bits 16-47 = IPv4)
+	mustCIDR("64:ff9b::/96"),   // RFC 6052  – NAT64 well-known
+	mustCIDR("64:ff9b:1::/48"), // RFC 8215  – NAT64 local-use
+	mustCIDR("fec0::/10"),      // RFC 3879  – site-local (deprecated)
 }
 
 // IsPublicIP reports whether ip is a routable public address. It rejects

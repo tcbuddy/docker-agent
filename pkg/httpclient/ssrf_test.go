@@ -36,15 +36,15 @@ func TestIsPublicIP(t *testing.T) {
 		// CGNAT RFC 6598 (100.64.0.0/10)
 		{"100.64.0.1", false},
 		{"100.127.255.254", false},
-		{"100.63.255.255", true},  // just below CGNAT
+		{"100.63.255.255", true}, // just below CGNAT
 		{"100.128.0.1", true},    // just above CGNAT
 
 		// 6to4 (RFC 3056, 2002::/16)
 		{"2002:a9fe:a9fe::", false}, // encodes 169.254.169.254
 		{"2002:0a00:0001::", false}, // encodes 10.0.0.1
 		{"2002::1", false},
-		{"2001::1", true},  // just outside
-		{"2003::1", true},  // just outside
+		{"2001::1", true}, // just outside
+		{"2003::1", true}, // just outside
 
 		// NAT64 well-known (RFC 6052, 64:ff9b::/96)
 		{"64:ff9b::a9fe:a9fe", false}, // encodes 169.254.169.254
