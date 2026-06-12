@@ -102,6 +102,7 @@ func (r *LocalRuntime) buildGatewayChoices(ctx context.Context) ([]ModelChoice, 
 			Provider:  prov,
 			Model:     model,
 			IsCatalog: true,
+			IsGateway: true,
 		}
 		if r.modelsStore != nil {
 			if m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(prov, model)); err == nil && m != nil {

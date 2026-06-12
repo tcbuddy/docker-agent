@@ -28,6 +28,15 @@ type modelPickerDialog struct {
 	models   []runtime.ModelChoice
 	filtered []runtime.ModelChoice
 	errMsg   string // validation error message
+
+	// hasGateway is true when at least one model is advertised by a
+	// models gateway; it enables the gateway/all-models scope toggle.
+	hasGateway bool
+	// gatewayOnly hides catalog models the gateway doesn't advertise.
+	// Defaults to true when gateway models are present, since gateways
+	// may refuse models they don't serve.
+	gatewayOnly bool
+	toggleScope key.Binding
 }
 
 // Model picker dialog dimension constants
@@ -59,6 +68,8 @@ const (
 
 	// catalogSeparatorLabel labels the separator above the catalog group.
 	catalogSeparatorLabel = "Other models"
+	// gatewaySeparatorLabel labels the separator above the gateway group.
+	gatewaySeparatorLabel = "Gateway models"
 	// customSeparatorLabel labels the separator above the custom-models group.
 	customSeparatorLabel = "Custom models"
 )
@@ -77,11 +88,20 @@ var modelPickerLayout = pickerLayout{
 // NewModelPickerDialog creates a new model picker dialog.
 func NewModelPickerDialog(models []runtime.ModelChoice) Dialog {
 	d := &modelPickerDialog{
-		pickerCore: newPickerCore(modelPickerLayout, "Type to search or enter custom model (provider/model)…"),
+		pickerCore:  newPickerCore(modelPickerLayout, "Type to search or enter custom model (provider/model)…"),
+		toggleScope: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "toggle scope")),
 	}
 	d.textInput.CharLimit = 100
 
-	// Sort models: config first, then catalog, then custom.
+	for _, m := range models {
+		if m.IsGateway {
+			d.hasGateway = true
+			d.gatewayOnly = true
+			break
+		}
+	}
+
+	// Sort models: config first, then gateway, then catalog, then custom.
 	sortedModels := slices.Clone(models)
 	slices.SortFunc(sortedModels, func(a, b runtime.ModelChoice) int {
 		return comparePickerSortKeys(modelSortKeys(a), modelSortKeys(b))
@@ -96,9 +116,11 @@ func modelSortKeys(m runtime.ModelChoice) pickerSortKeys {
 	section := 0
 	switch {
 	case m.IsCustom:
-		section = 2
-	case m.IsCatalog:
+		section = 3
+	case m.IsGateway:
 		section = 1
+	case m.IsCatalog:
+		section = 2
 	}
 	return pickerSortKeys{
 		Section:   section,
@@ -148,6 +170,10 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		case key.Matches(msg, d.keyMap.Enter):
 			cmd := d.handleSelection()
 			return d, cmd
+		case d.hasGateway && key.Matches(msg, d.toggleScope):
+			d.gatewayOnly = !d.gatewayOnly
+			d.filterModels()
+			return d, nil
 		default:
 			cmd := d.handleInputChange(msg)
 			return d, cmd
@@ -167,9 +193,9 @@ func (d *modelPickerDialog) handleInputChange(msg tea.Msg) tea.Cmd {
 }
 
 // buildList constructs the list of models with section separators between
-// the (config -> catalog -> custom) groups. Pass contentWidth=0 to compute
-// the layout without rendering items (used by mouse hit-testing and
-// findSelectedLine).
+// the (config -> gateway -> catalog -> custom) groups. Pass contentWidth=0
+// to compute the layout without rendering items (used by mouse hit-testing
+// and findSelectedLine).
 func (d *modelPickerDialog) buildList(contentWidth int) *groupedList {
 	gl := newGroupedList()
 
@@ -186,20 +212,32 @@ func (d *modelPickerDialog) buildList(contentWidth int) *groupedList {
 		}
 	}
 
+	gatewaySepShown := false
 	catalogSepShown := false
 	customSepShown := false
 	for i, model := range d.filtered {
-		if model.IsCatalog && !model.IsCustom && !catalogSepShown {
-			if hasConfig {
-				gl.AddNonItem(RenderGroupSeparator(catalogSeparatorLabel, contentWidth))
+		switch {
+		case model.IsCustom:
+			if !customSepShown {
+				if hasConfig || hasCatalog {
+					gl.AddNonItem(RenderGroupSeparator(customSeparatorLabel, contentWidth))
+				}
+				customSepShown = true
 			}
-			catalogSepShown = true
-		}
-		if model.IsCustom && !customSepShown {
-			if hasConfig || hasCatalog {
-				gl.AddNonItem(RenderGroupSeparator(customSeparatorLabel, contentWidth))
+		case model.IsGateway:
+			if !gatewaySepShown {
+				if hasConfig {
+					gl.AddNonItem(RenderGroupSeparator(gatewaySeparatorLabel, contentWidth))
+				}
+				gatewaySepShown = true
 			}
-			customSepShown = true
+		case model.IsCatalog:
+			if !catalogSepShown {
+				if hasConfig || gatewaySepShown {
+					gl.AddNonItem(RenderGroupSeparator(catalogSeparatorLabel, contentWidth))
+				}
+				catalogSepShown = true
+			}
 		}
 		gl.AddItem(d.renderModel(model, i == d.selected, contentWidth))
 	}
@@ -295,6 +333,12 @@ func (d *modelPickerDialog) filterModels() {
 
 	d.filtered = d.filtered[:0]
 	for _, model := range d.models {
+		// In gateway scope, hide catalog models the gateway doesn't
+		// advertise; configured and custom models are always shown.
+		if d.gatewayOnly && model.IsCatalog && !model.IsGateway && !model.IsCustom {
+			continue
+		}
+
 		if query == "" {
 			d.filtered = append(d.filtered, model)
 			continue
@@ -352,10 +396,24 @@ func (d *modelPickerDialog) View() string {
 		AddSeparator().
 		AddContent(d.renderDetails(contentWidth)).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "select", "esc", "cancel").
+		AddHelpKeys(d.helpKeys()...).
 		Build()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content)
+}
+
+// helpKeys returns the help bindings for the bottom bar. The scope toggle
+// is only advertised when gateway models are present.
+func (d *modelPickerDialog) helpKeys() []string {
+	keys := []string{"↑/↓", "navigate", "enter", "select"}
+	if d.hasGateway {
+		label := "show all models"
+		if !d.gatewayOnly {
+			label = "show gateway models"
+		}
+		keys = append(keys, "tab", label)
+	}
+	return append(keys, "esc", "cancel")
 }
 
 // pickerRowPalette is the set of styles used to render one row of the
