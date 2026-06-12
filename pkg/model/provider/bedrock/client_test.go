@@ -2,10 +2,12 @@ package bedrock
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -725,6 +727,102 @@ func TestBuildAdditionalModelRequestFields_NoMaxTokensSet(t *testing.T) {
 	result := client.buildAdditionalModelRequestFields()
 
 	require.NotNil(t, result, "expected document when MaxTokens is nil")
+}
+
+// decodeRequestFields unmarshals a lazy smithy document back into a map for
+// assertions on its contents.
+func decodeRequestFields(t *testing.T, doc document.Interface) map[string]any {
+	t.Helper()
+	raw, err := doc.MarshalSmithyDocument()
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	return fields
+}
+
+func bedrockThinkingClient(model string, budget *latest.ThinkingBudget) *Client {
+	maxTokens := int64(64000)
+	return &Client{
+		Config: base.Config{
+			ModelConfig: latest.ModelConfig{
+				Provider:       "amazon-bedrock",
+				Model:          model,
+				MaxTokens:      &maxTokens,
+				ThinkingBudget: budget,
+			},
+		},
+	}
+}
+
+func TestBuildAdditionalModelRequestFields_Adaptive(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		model      string
+		budget     latest.ThinkingBudget
+		wantEffort string
+	}{
+		{
+			name:       "explicit adaptive defaults to high",
+			model:      "global.anthropic.claude-opus-4-8-20260601-v1:0",
+			budget:     latest.ThinkingBudget{Effort: "adaptive"},
+			wantEffort: "high",
+		},
+		{
+			name:       "adaptive with explicit effort",
+			model:      "global.anthropic.claude-opus-4-8-20260601-v1:0",
+			budget:     latest.ThinkingBudget{Effort: "adaptive/low"},
+			wantEffort: "low",
+		},
+		{
+			name:       "token budget coerced on adaptive-only model",
+			model:      "global.anthropic.claude-opus-4-8-20260601-v1:0",
+			budget:     latest.ThinkingBudget{Tokens: 32768},
+			wantEffort: "high",
+		},
+		{
+			name:       "effort level coerced on adaptive-only model",
+			model:      "anthropic.claude-opus-4-6-v1:0",
+			budget:     latest.ThinkingBudget{Effort: "medium"},
+			wantEffort: "medium",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := bedrockThinkingClient(tc.model, &tc.budget)
+
+			result := client.buildAdditionalModelRequestFields()
+			require.NotNil(t, result)
+
+			fields := decodeRequestFields(t, result)
+			assert.Equal(t, map[string]any{"type": "adaptive"}, fields["thinking"])
+			assert.Equal(t, map[string]any{"effort": tc.wantEffort}, fields["output_config"])
+			assert.NotContains(t, fields, "anthropic_beta", "adaptive thinking needs no interleaved beta")
+			assert.True(t, client.isThinkingEnabled(), "adaptive thinking must suppress temperature/top_p")
+		})
+	}
+}
+
+func TestBuildAdditionalModelRequestFields_EffortMapsToTokens(t *testing.T) {
+	t.Parallel()
+
+	// On models that still support token-based thinking, effort levels map
+	// to token budgets instead of adaptive thinking.
+	client := bedrockThinkingClient(
+		"global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		&latest.ThinkingBudget{Effort: "high"},
+	)
+
+	result := client.buildAdditionalModelRequestFields()
+	require.NotNil(t, result)
+
+	fields := decodeRequestFields(t, result)
+	assert.Equal(t, map[string]any{"type": "enabled", "budget_tokens": float64(16384)}, fields["thinking"])
+	assert.NotContains(t, fields, "output_config")
 }
 
 func TestBuildInferenceConfig_DisablesTempTopPWhenThinkingEnabled(t *testing.T) {

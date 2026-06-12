@@ -87,14 +87,21 @@ func AlwaysReasons(modelID string) bool {
 // `thinking.type=enabled` (token-based extended thinking) and instead requires
 // `thinking.type=adaptive`.
 //
-// Currently Claude Opus 4.6 and 4.7 (and dated variants like
-// claude-opus-4-7-20251101). For these models the agent transparently
-// switches a token-based budget to adaptive thinking.
+// Currently Claude Opus 4.6, 4.7 and 4.8 (and dated variants like
+// claude-opus-4-7-20251101). Bedrock-style identifiers such as
+// "global.anthropic.claude-opus-4-8-20260601-v1:0" are recognised too.
+// For these models the agent transparently switches a token-based budget to
+// adaptive thinking.
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func RejectsTokenThinking(modelID string) bool {
 	m := normalize(modelID)
-	for _, prefix := range []string{"claude-opus-4-6", "claude-opus-4-7"} {
+	// Strip the Bedrock "anthropic." prefix and optional regional inference
+	// profile ("global.", "us.", ...) to get the bare Claude model name.
+	if IsBedrockClaudeID(m) {
+		m = m[strings.Index(m, "anthropic.claude-")+len("anthropic."):]
+	}
+	for _, prefix := range []string{"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"} {
 		if m == prefix || strings.HasPrefix(m, prefix+"-") {
 			return true
 		}
