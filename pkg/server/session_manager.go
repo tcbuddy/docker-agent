@@ -239,6 +239,55 @@ func (sm *SessionManager) GetSessionStatus(_ context.Context, id string) (*api.S
 	}, nil
 }
 
+// GetSessionSnapshot returns the full, self-contained state of a session: its
+// stored fields plus, when an active runtime is attached, its live runtime
+// state (streaming, current agent) and the sequence number of the most recent
+// event on its /events stream. It is the resync primitive for the control
+// plane: a client reads the snapshot, then tails /events?since=<LastEventSeq>
+// to continue without a gap.
+func (sm *SessionManager) GetSessionSnapshot(ctx context.Context, id string) (*api.SessionSnapshotResponse, error) {
+	// Prefer the live in-memory session (it has the freshest messages and
+	// title) and fall back to the store when the session is not attached.
+	var sess *session.Session
+	streaming := false
+	agent := ""
+	if rs, ok := sm.runtimeSessions.Load(id); ok {
+		sess = rs.session
+		agent = rs.runtime.CurrentAgentName()
+		// Probe streaming state without interfering: TryLock succeeds only
+		// when no RunStream is in progress.
+		if rs.streaming.TryLock() {
+			rs.streaming.Unlock()
+		} else {
+			streaming = true
+		}
+	}
+	if sess == nil {
+		var err error
+		sess, err = sm.sessionStore.GetSession(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	lastSeq, _ := sm.LastEventSeq(id)
+
+	return &api.SessionSnapshotResponse{
+		ID:            sess.ID,
+		Title:         sess.Title,
+		CreatedAt:     sess.CreatedAt,
+		WorkingDir:    sess.WorkingDir,
+		Messages:      sess.GetAllMessages(),
+		ToolsApproved: sess.ToolsApproved,
+		Permissions:   sess.Permissions,
+		InputTokens:   sess.InputTokens,
+		OutputTokens:  sess.OutputTokens,
+		Streaming:     streaming,
+		Agent:         agent,
+		LastEventSeq:  lastSeq,
+	}, nil
+}
+
 // CreateSession creates a new session from a template.
 func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *session.Session) (*session.Session, error) {
 	var opts []session.Opt

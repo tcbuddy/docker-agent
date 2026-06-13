@@ -67,6 +67,7 @@ func (s *Server) registerRoutes() {
 	group.GET("/sessions", s.getSessions)
 	group.GET("/sessions/:id", s.getSession)
 	group.GET("/sessions/:id/status", s.getSessionStatus)
+	group.GET("/sessions/:id/snapshot", s.getSessionSnapshot)
 	group.POST("/sessions/:id/resume", s.resumeSession)
 	group.POST("/sessions/:id/tools/toggle", s.toggleSessionYolo)
 	group.PATCH("/sessions/:id/permissions", s.updateSessionPermissions)
@@ -257,6 +258,18 @@ func (s *Server) getSessionStatus(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
 	}
 	return c.JSON(http.StatusOK, status)
+}
+
+// getSessionSnapshot returns the full state of a session in one response
+// (stored fields + live runtime state + last event sequence number) so a
+// client can rebuild its view and then tail /events?since=<last_event_seq>
+// without missing any transition.
+func (s *Server) getSessionSnapshot(c echo.Context) error {
+	snapshot, err := s.sm.GetSessionSnapshot(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
+	}
+	return c.JSON(http.StatusOK, snapshot)
 }
 
 func (s *Server) resumeSession(c echo.Context) error {

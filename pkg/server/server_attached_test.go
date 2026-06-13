@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -456,4 +457,73 @@ func readSSE(t *testing.T, r io.Reader, n int) (ids, types []string) {
 		}
 	}
 	return ids, types
+}
+
+// TestAttachedServer_SnapshotReturnsStateAndLastEventSeq verifies the snapshot
+// endpoint returns the session's state together with the latest event
+// sequence number, so a client can resync then tail /events?since= gaplessly.
+func TestAttachedServer_SnapshotReturnsStateAndLastEventSeq(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	sess.Title = "Snapshot Test"
+	sess.AddMessage(session.UserMessage("hello"))
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(sess.ID, &fakeRuntime{}, sess)
+
+	events := make(chan any, 4)
+	sm.RegisterEventSource(sess.ID, func(ctx context.Context, send func(any)) {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-events:
+				send(ev)
+			}
+		}
+	})
+
+	srv := NewWithManager(sm, "")
+	ln, err := Listen(ctx, "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(ctx, ln) }()
+	addr := "http://" + ln.Addr().String()
+
+	// Two events buffered.
+	events <- map[string]string{"type": "one"}
+	events <- map[string]string{"type": "two"}
+	require.Eventually(t, func() bool {
+		seq, ok := sm.LastEventSeq(sess.ID)
+		return ok && seq == 2
+	}, 2*time.Second, time.Millisecond)
+
+	resp := httpDoTCP(t, ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/snapshot", nil)
+
+	var snap api.SessionSnapshotResponse
+	require.NoError(t, json.Unmarshal(resp, &snap))
+
+	assert.Equal(t, sess.ID, snap.ID)
+	assert.Equal(t, "Snapshot Test", snap.Title)
+	assert.False(t, snap.Streaming)
+	assert.Len(t, snap.Messages, 1)
+	assert.Equal(t, uint64(2), snap.LastEventSeq)
+
+	// Tailing from the snapshot's seq yields only newer events.
+	events <- map[string]string{"type": "three"}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		addr+"/api/sessions/"+sess.ID+"/events?since="+strconv.FormatUint(snap.LastEventSeq, 10), http.NoBody)
+	require.NoError(t, err)
+	streamResp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer streamResp.Body.Close()
+
+	ids, types := readSSE(t, streamResp.Body, 1)
+	assert.Equal(t, []string{"3"}, ids)
+	assert.Equal(t, []string{"three"}, types)
 }
