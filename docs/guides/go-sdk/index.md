@@ -312,8 +312,8 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // Example: add a custom header to every outbound LLM request
 wrapper := options.WithHTTPTransportWrapper(
-    func(base http.RoundTripper) (http.RoundTripper, error) {
-        return &headerTransport{base: base}, nil
+    func(base http.RoundTripper) http.RoundTripper {
+        return &headerTransport{base: base}
     },
 )
 
