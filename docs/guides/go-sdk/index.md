@@ -325,18 +325,18 @@ client, err := openai.NewClient(ctx, &latest.ModelConfig{
 
 The wrapper receives the already-instrumented transport (OpenTelemetry, SSE decompression, Desktop proxy support) as its `base` argument, so wrapping it preserves all built-in behaviour.
 
-**Supported providers:** Anthropic, OpenAI, Gemini (GeminiAPI backend). Works in both direct and gateway/proxy mode.
+**Supported providers:** Anthropic, OpenAI, Gemini (GeminiAPI backend), Bedrock. Works in both direct and gateway/proxy mode.
 
 <div class="callout callout-warning" markdown="1">
-<div class="callout-title">Bedrock and Vertex AI not supported
+<div class="callout-title">Vertex AI not supported
 </div>
-  <p>Bedrock and Vertex AI use SDK-managed transports that docker-agent cannot intercept. Passing <code>WithHTTPTransportWrapper</code> when targeting these providers has no effect; a warning is logged at startup.</p>
+  <p>Vertex AI uses an ADC-managed HTTP client that docker-agent cannot intercept. When a transport wrapper is set, docker-agent falls back to the GeminiAPI backend instead of Vertex AI — a debug message is logged.</p>
 
 </div>
 
 In **gateway mode** the wrapper is called on every LLM request because gateway clients are rebuilt each call for short-lived auth tokens. In **direct mode** it is called once at client construction. Rate-limit responses (HTTP 429) are classified as non-retryable by the runtime and cause the model chain to skip to the next fallback, so wrappers that track per-request outcomes will observe these as failures rather than retried calls.
 
-Returning `nil` from your wrapper function is treated as a bug: docker-agent logs a warning and preserves the original transport instead.
+Returning `nil` from your wrapper function is not allowed; docker-agent logs a warning and keeps the original transport instead.
 
 ## Using Different Providers
 
