@@ -326,6 +326,13 @@ func repoRoot(ctx context.Context, dir string) (string, error) {
 // "origin/main") so the worktree branches from the latest remote state. Refs
 // that don't name a remote (a local branch, tag, or commit) are left alone.
 // A fetch failure is reported as [ErrInvalidBase].
+//
+// A fully-qualified refspec (refs/heads/<branch>:refs/remotes/<remote>/<branch>)
+// is used so the remote-tracking ref is updated regardless of the repository's
+// fetch configuration (custom refspecs, --no-tags, tagOpt, ...). A bare
+// "git fetch <remote> <branch>" only guarantees FETCH_HEAD is written, which
+// would leave the subsequent "git worktree add ... <remote>/<branch>"
+// resolving a stale remote-tracking ref.
 func fetchBase(ctx context.Context, root, base string) error {
 	remote, branch, ok := strings.Cut(base, "/")
 	if !ok {
@@ -334,7 +341,8 @@ func fetchBase(ctx context.Context, root, base string) error {
 	if !isRemote(ctx, root, remote) {
 		return nil
 	}
-	if err := git(ctx, root, "fetch", remote, branch); err != nil {
+	refspec := "refs/heads/" + branch + ":refs/remotes/" + remote + "/" + branch
+	if err := git(ctx, root, "fetch", remote, refspec); err != nil {
 		return fmt.Errorf("%w: fetching %s: %w", ErrInvalidBase, base, err)
 	}
 	return nil

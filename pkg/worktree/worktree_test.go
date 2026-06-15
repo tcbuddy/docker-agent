@@ -133,6 +133,39 @@ func TestCreateWithRemoteBaseFetches(t *testing.T) {
 	assert.FileExists(t, filepath.Join(wt.Dir, "newer.txt"))
 }
 
+func TestCreateWithRemoteBaseUpdatesTrackingRefWithoutFetchConfig(t *testing.T) {
+	// A remote with one extra commit beyond what the clone has.
+	remote := bootstrapRepo(t)
+	remoteBranch := gitOut(t, remote, "rev-parse", "--abbrev-ref", "HEAD")
+
+	clone, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	runGit(t, clone, "clone", remote, ".")
+	runGit(t, clone, "config", "user.email", "test@example.com")
+	runGit(t, clone, "config", "user.name", "Test User")
+	runGit(t, clone, "config", "commit.gpgsign", "false")
+	// Drop the default fetch refspec so a bare "git fetch origin <branch>"
+	// would only write FETCH_HEAD and leave refs/remotes/origin/<branch>
+	// stale. fetchBase must use an explicit refspec to update it anyway.
+	runGit(t, clone, "config", "--unset-all", "remote.origin.fetch")
+
+	require.NoError(t, os.WriteFile(filepath.Join(remote, "newer.txt"), []byte("N"), 0o644))
+	runGit(t, remote, "add", ".")
+	runGit(t, remote, "commit", "-m", "newer work")
+	newerHead := gitOut(t, remote, "rev-parse", "HEAD")
+
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	wt, err := Create(t.Context(), clone, "from-remote-noconfig", WithBase("origin/"+remoteBranch))
+	require.NoError(t, err)
+
+	// The explicit refspec updated the remote-tracking ref despite the missing
+	// fetch config, so the worktree starts at the latest remote commit.
+	assert.Equal(t, newerHead, gitOut(t, wt.Dir, "rev-parse", "HEAD"))
+	assert.FileExists(t, filepath.Join(wt.Dir, "newer.txt"))
+}
+
 func TestCreateFromSubfolder(t *testing.T) {
 	root := bootstrapRepo(t)
 	sub := filepath.Join(root, "nested")
